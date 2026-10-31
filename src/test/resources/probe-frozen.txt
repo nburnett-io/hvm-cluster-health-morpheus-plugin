@@ -1,0 +1,175 @@
+@@meta
+HOSTNAME=hvm-node02
+NOW=1793385845
+BOOT=1784120527
+KERNEL=6.8.0-117-generic
+OS_VERSION=24.04
+LOAD1=641.14
+NPROC=56
+REBOOT_REQUIRED=0
+HVMCLI=
+MODE=quick
+@@services
+corosync|active|enabled
+dlm|active|enabled
+pacemaker|inactive|masked
+pcsd|active|enabled
+libvirtd|active|enabled
+multipathd|active|enabled
+iscsid|active|enabled
+chrony|inactive|not-found
+systemd-timesyncd|active|enabled
+morpheus-morphd|active|enabled
+@@corosync_conf
+# MORPHEUS MANAGED
+# morpheus_version: 1.3
+# morpheus_config_rev: 3
+totem {
+    version: 2
+    cluster_name: cluster-a
+    config_version: 3
+    transport: knet
+    token: 60000
+    consensus: 72000
+    join: 10000
+}
+nodelist {
+    node {
+        ring0_addr: 192.0.2.1
+        name: hvm-node01
+        nodeid: 1
+    }
+    node {
+        ring0_addr: 192.0.2.2
+        name: hvm-node02
+        nodeid: 2
+    }
+    node {
+        ring0_addr: 192.0.2.3
+        name: hvm-node03
+        nodeid: 3
+    }
+}
+quorum {
+    provider: corosync_votequorum
+}
+@@corosync_key
+0123456789abcdef
+@@quorum
+Quorum information
+------------------
+Date:             Fri Oct 30 14:44:00 2026
+Quorum provider:  corosync_votequorum
+Nodes:            2
+Node ID:          2
+Ring ID:          2.88
+Quorate:          Yes
+
+Votequorum information
+----------------------
+Expected votes:   3
+Highest expected: 3
+Total votes:      2
+Quorum:           2
+Flags:            Quorate
+
+Membership information
+----------------------
+    Nodeid      Votes Name
+         2          1 hvm-node02 (local)
+         3          1 hvm-node03
+@@links
+Local node ID 2, transport knet
+nodeid: 1 reachable
+   LINK: 0 udp (192.0.2.2->192.0.2.1) enabled mtu: 1397
+nodeid: 3 reachable
+@@totem
+runtime.config.totem.consensus (u32) = 72000
+runtime.config.totem.token (u32) = 60650
+@@dlm_ls
+dlm lockspaces
+name          ds_01
+id            0xcbd7deb0
+flags         0x00000004 kern_stop
+change        member 3 joined 1 remove 0 failed 0 seq 13,13
+members       1 2 3
+new change    member 2 joined 0 remove 1 failed 1 seq 14,14
+new status    wait fencing
+new members   2 3
+@@dlm_status
+cluster nodeid 2 quorate 1 ring seq 136 136
+daemon now 9264127 fence_pid 2753718
+fence 1 procdown pid 2753718 actor 2 fail 1793379311 fence 0 now 1793385845
+node 1 X add 810369 rem 9257593 fail 9257593 fence 0 at 0 0
+node 2 M add 190952 rem 0 fail 0 fence 0 at 0 0
+node 3 M add 6894911 rem 6888334 fail 6888334 fence 6888334 at 1 1791010018
+@@dlm_conf
+enable_fencing=1
+enable_quorum_fencing=0
+enable_quorum_lockspace=0
+@@fence_acks
+3|222
+@@gfs2
+MOUNT=/dev/mapper/3624a9370aaaaaaaaaaaaaaaa00000001|/mnt/11111111-2222-3333-4444-555555555555
+TABLE=cluster-a:ds_01|0|0
+FS_SAFE=0
+@@gfs2_fs
+@@stuck
+D_COUNT=647
+D_OLDEST=6500
+D_COMM=tee|322
+D_COMM=grep|322
+D_COMM=qemu-system-x86|2
+D_VM=vm-one
+D_VM=vm-two
+HUNG_1H=30
+@@vms
+ 3    vm-one   running
+ 4    vm-two   running
+@@vm_ops
+STATE_LOCK_15M=12
+AGENT_KILLS_15M=40
+@@multipath
+3624a9370aaaaaaaaaaaaaaaa00000001 dm-1 PURE,FlashArray
+size=4.0T features='0' hwhandler='1 alua' wp=rw
+`-+- policy='service-time 0' prio=50 status=active
+  |- 16:0:0:254 sdd 8:48  active ready running
+  |- 17:0:0:254 sde 8:64  active ready running
+  |- 18:0:0:254 sdg 8:96  active ready running
+  `- 19:0:0:254 sdf 8:80  active ready running
+@@iscsi
+PORTAL_DEV=198.51.100.86|iscsia
+PORTAL_DEV=198.51.100.87|iscsib
+SESSIONS=4
+ERRORS_24H=0
+@@links_net
+lo|65536|UNKNOWN
+eno1|1500|UP
+eno2|1500|UP
+bond0|1500|UP
+bond0.10|1500|UP
+iscsia|9000|UP
+iscsib|9000|UP
+@@bonds
+BOND=bond0|load balancing (round-robin)
+SLAVE=bond0|eno1|up
+SLAVE=bond0|eno2|up
+@@ring
+RING_DEV=bond0.10
+@@layout
+OVS_BRIDGES=compute,mgmt,
+VIRTSWITCH_FILES=0
+NETPLAN_FILES=
+@@lldp
+LLDPCLI=
+LLDPD=inactive
+@@time
+NTP=yes
+NTP_SYNCED=yes
+@@packages
+corosync|3.1.7-1ubuntu3
+dlm-controld|4.2.0-3
+gfs2-utils|3.5.1-1
+morpheus-node|3.2.6
+@@end
+COMPLETE=1

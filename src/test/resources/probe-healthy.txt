@@ -1,0 +1,175 @@
+@@meta
+HOSTNAME=hvm-node02
+NOW=1793385845
+BOOT=1784120527
+KERNEL=7.0.0-15-generic
+OS_VERSION=26.04
+LOAD1=1.10
+NPROC=56
+REBOOT_REQUIRED=0
+HVMCLI=/usr/local/bin/hvmcli
+MODE=full
+@@services
+corosync|active|enabled
+dlm|active|enabled
+pacemaker|inactive|masked
+pcsd|active|enabled
+libvirtd|active|enabled
+multipathd|active|enabled
+iscsid|active|enabled
+chrony|active|enabled
+systemd-timesyncd|inactive|disabled
+morpheus-morphd|active|enabled
+@@corosync_conf
+# MORPHEUS MANAGED
+# morpheus_version: 2.0
+totem {
+    version: 2
+    cluster_name: cluster-b
+    config_version: 3
+    transport: knet
+    token: 60000
+    consensus: 72000
+}
+nodelist {
+    node {
+        ring0_addr: 192.0.2.1
+        name: hvm-node01
+        nodeid: 1
+    }
+    node {
+        ring0_addr: 192.0.2.2
+        name: hvm-node02
+        nodeid: 2
+    }
+    node {
+        ring0_addr: 192.0.2.3
+        name: hvm-node03
+        nodeid: 3
+    }
+}
+quorum {
+    provider: corosync_votequorum
+}
+@@corosync_key
+0123456789abcdef
+@@quorum
+Quorate:          Yes
+Expected votes:   3
+Total votes:      3
+Quorum:           2
+Flags:            Quorate
+Membership information
+----------------------
+    Nodeid      Votes Name
+         1          1 hvm-node01
+         2          1 hvm-node02 (local)
+         3          1 hvm-node03
+@@links
+Local node ID 2, transport knet
+nodeid: 1 reachable
+nodeid: 3 reachable
+@@totem
+runtime.config.totem.consensus (u32) = 72000
+runtime.config.totem.token (u32) = 60650
+@@dlm_ls
+dlm lockspaces
+name          ds_01
+id            0xcbd7deb0
+flags         0x00000000
+change        member 3 joined 1 remove 0 failed 0 seq 1,1
+members       1 2 3
+@@dlm_status
+cluster nodeid 2 quorate 1 ring seq 136 136
+daemon now 9264127 fence_pid 0
+node 1 M add 1 rem 0 fail 0 fence 0 at 0 0
+node 2 M add 1 rem 0 fail 0 fence 0 at 0 0
+node 3 M add 1 rem 0 fail 0 fence 0 at 0 0
+@@dlm_conf
+enable_fencing=1
+enable_quorum_fencing=0
+enable_quorum_lockspace=0
+@@fence_acks
+@@gfs2
+MOUNT=/dev/mapper/3624a9370aaaaaaaaaaaaaaaa00000001|/mnt/11111111-2222-3333-4444-555555555555
+TABLE=cluster-b:ds_01|0|0
+FS_SAFE=1
+@@gfs2_fs
+FS_TIMEOUT=0
+USAGE=/mnt/11111111-2222-3333-4444-555555555555|4398046511104|439804651110
+HB=hvm-node01|1793385840000
+HB=hvm-node02|1793385840000
+HB=hvm-node03|1793385840000
+@@stuck
+D_COUNT=0
+D_OLDEST=0
+HUNG_1H=0
+@@vms
+ 5    vm-one   running
+@@vm_ops
+STATE_LOCK_15M=0
+AGENT_KILLS_15M=0
+@@multipath
+3624a9370aaaaaaaaaaaaaaaa00000001 dm-1 PURE,FlashArray
+size=4.0T features='0' hwhandler='1 alua' wp=rw
+`-+- policy='service-time 0' prio=50 status=active
+  |- 16:0:0:254 sdd 8:48  active ready running
+  `- 17:0:0:254 sde 8:64  active ready running
+@@iscsi
+PORTAL_DEV=198.51.100.86|iscsia
+SESSIONS=2
+ERRORS_24H=0
+@@links_net
+lo|65536|UNKNOWN
+vs0|1500|UP
+iscsia|9000|UP
+@@bonds
+BOND=vs0bond|IEEE 802.3ad Dynamic link aggregation
+SLAVE=vs0bond|eno1|up
+SLAVE=vs0bond|eno2|up
+@@ring
+RING_DEV=vs0
+PEER=192.0.2.1|0|0.25|1|1|1500
+PEER=192.0.2.3|0|0.31|1|1|1500
+@@layout
+OVS_BRIDGES=
+VIRTSWITCH_FILES=1
+NETPLAN_FILES=99-hvmcli-virtswitch-vs0.yaml,
+@@lldp
+LLDPCLI=/usr/sbin/lldpcli
+LLDPD=active
+lldp.eno1.via=LLDP
+lldp.eno1.chassis.name=switch-a
+lldp.eno1.port.ifname=Te1/0/14
+lldp.eno1.vlan.vlan-id=193
+lldp.eno1.vlan.pvid=yes
+lldp.eno2.via=LLDP
+lldp.eno2.chassis.name=switch-b
+lldp.eno2.port.ifname=Te1/0/14
+lldp.eno2.vlan.vlan-id=193
+lldp.eno2.vlan.pvid=yes
+@@time
+NTP=yes
+NTP_SYNCED=yes
+CHRONY=C0000201,192.0.2.123,3,1793412219.98,0.000080557,0.000190598,0.000150929,-87.088,0.000,0.020,0.05,0.005,1043.5,Normal
+CHRONY_SOURCE=^,*,192.0.2.123,2,10,377,251,-0.0004,-0.0004,0.04
+CHRONY_FOLLOWING=ntp1.example.invalid
+CONF_SERVER=ntp1.example.invalid
+@@cpu
+CPU_MODEL=Example CPU 3000
+CPU_FLAGS=08dd0072dea29009
+MEM_TOTAL_KB=95093324
+MEM_AVAIL_KB=91083840
+@@pools
+ local                  active   yes
+ ds-01                  active   yes
+@@packages
+corosync|3.1.9-1
+morpheus-node|3.2.6
+@@journals
+JOURNALS=/dev/mapper/3624a9370aaaaaaaaaaaaaaaa00000001|3
+@@bmc
+BMC_IP=203.0.113.5
+WATCHDOG=/dev/watchdog
+@@end
+COMPLETE=1

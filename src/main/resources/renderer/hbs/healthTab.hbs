@@ -1,0 +1,44 @@
+<style nonce="{{nonce}}">
+  /* every class here is hh-prefixed: Morpheus's own stylesheet and Bootstrap also define .banner, .row, .muted and .hint */
+  .hvm-health { max-width: 100%; min-width: 0; white-space: normal; overflow-wrap: break-word; }
+  .hvm-health section { margin: 0 0 22px; max-width: 100%; overflow-x: auto; }
+  .hvm-health h3 { margin: 0 0 8px; font-size: 15px; }
+  .hvm-health table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .hvm-health th, .hvm-health td { text-align: left; padding: 4px 6px; border-bottom: 1px solid rgba(128,128,128,.25); vertical-align: top; overflow-wrap: break-word; }
+  .hvm-health th { white-space: nowrap; }
+  .hvm-health td { white-space: normal; }
+  .hvm-health td > .hh-nw, .hvm-health td.hh-nw { white-space: nowrap; }
+  .hvm-health .hh-time-input { width: 340px; max-width: 100%; padding: 3px 6px; flex: 0 1 auto; }
+  .hvm-health .st-PASS { color: #2e7d32; } .hvm-health .st-FAIL { color: #c62828; font-weight: 600; }
+  .hvm-health .st-WARN { color: #b26a00; } .hvm-health .st-NA { opacity: .55; }
+  .hvm-health .hh-muted { opacity: .7; } .hvm-health .hh-err { color: #c62828; }
+  .hvm-health .hh-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+  .hvm-health .hh-row > span, .hvm-health .hh-row > label { flex: 1 1 260px; min-width: 0; white-space: normal; }
+  .hvm-health .btn { margin: 0; flex: none; }
+  .hvm-health pre { white-space: pre-wrap; font-size: 11px; max-height: 260px; overflow: auto; margin: 6px 0; }
+  .hvm-health .hh-hint { margin-top: 4px; font-size: 11px; color: #b26a00; white-space: normal; }
+  .hvm-health .hh-banner { position: static; display: block; width: auto; height: auto; padding: 10px 12px; border-radius: 3px; font-size: 14px; font-weight: 600; text-align: left; margin: 8px 0; border-left: 5px solid #888; background: none; }
+  .hvm-health .hh-ov-CRITICAL { border-color: #c62828; color: #c62828; }
+  .hvm-health .hh-ov-DEGRADED { border-color: #e65100; color: #e65100; }
+  .hvm-health .hh-ov-WARNING { border-color: #b26a00; color: #b26a00; }
+  .hvm-health .hh-ov-HEALTHY { border-color: #2e7d32; color: #2e7d32; }
+  .hvm-health .hh-emergency { border: 2px solid #c62828; padding: 10px 12px; margin-bottom: 8px; }
+  .hvm-health .hh-emergency input[type=text] { padding: 3px 6px; }
+  .hvm-health .hh-tier { font-size: 10px; opacity: .8; display: block; margin-top: 2px; }
+</style>
+<div class="hvm-health" data-cluster-id="{{id}}"
+     data-plugin-react-root data-plugin-key="hvmClusterHealth" data-plugin-entry="clusterTab">
+  <section data-section="summary"><h3>Cluster health</h3>
+    <div class="hh-row"><button type="button" class="btn btn-primary btn-sm" data-act="check">Run full check</button>
+      <span class="hh-muted">Read-only. Compares every host with the others and with this layout's standards.</span></div>
+    <div class="ph-body hh-muted">Loading… (if this never changes, the tab script was blocked: check the browser console)</div></section>
+  <section data-section="emergency"><div class="ph-body"></div></section>
+  <section data-section="findings"><h3>Findings</h3><div class="hh-row" data-field="filter"></div><div class="ph-body"></div></section>
+  <section data-section="time"><h3>Time</h3><div class="ph-body"></div></section>
+  <section data-section="hosts"><h3>Hosts</h3><div class="ph-body"></div></section>
+  <section data-section="standards"><h3>Standards in force</h3>
+    <div class="hh-row"><span class="hh-muted">Override any of these in the plugin's Site standards setting. "hpe" is from HPE documentation, "upstream" from corosync, DLM and GFS2, "morpheus" is how the layout deploys, "plugin" is this plugin's judgement, "site" is yours.</span></div>
+    <div class="ph-body"></div></section>
+  <section data-section="jobs"><h3>Operations</h3><div class="ph-body"></div></section>
+</div>
+<script src="{{asset "/health-tab.js"}}?v=@PLUGIN_VERSION@" nonce="{{nonce}}"></script>
