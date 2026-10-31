@@ -22,7 +22,6 @@ class Standards {
             minHosts          : [value: 3, source: 'hpe', note: 'HVM HA and GFS2 need quorum: three hosts'],
             mpio              : [value: true, source: 'hpe', note: 'MPIO for LUN-backed GFS2 datastores'],
             fencingEnabled    : [value: true, source: 'upstream', note: 'dlm.conf enable_fencing=1: GFS2 must not recover until a failed node is known down'],
-            quorumFencing     : [value: false, source: 'morpheus', note: 'dlm.conf enable_quorum_fencing=0, as deployed'],
             consensusRatio    : [value: 1.2, source: 'upstream', note: 'corosync.conf(5): consensus at least 1.2 x token'],
             corosyncToken     : [value: null, source: 'morpheus', note: 'Pinned per layout when known'],
             corosyncConsensus : [value: null, source: 'morpheus', note: 'Pinned per layout when known'],
@@ -30,6 +29,7 @@ class Standards {
             gfs2FailPct       : [value: 90, source: 'plugin', note: 'GFS2 datastore usage failure'],
             heartbeatMaxAgeSec: [value: 120, source: 'plugin', note: 'HVM heartbeat files are rewritten about every 20 s'],
             agentMaxAgeSec    : [value: 300, source: 'plugin', note: 'Oldest acceptable Morpheus agent check-in'],
+        agentMinVersion   : [value: '4.0.1', source: 'plugin', note: 'Oldest Morpheus agent seen to acknowledge the right node in a freeze: 3.2.6 did not'],
             maxClockSkewSec   : [value: 5, source: 'plugin', note: 'Between hosts when they share no time server, which leaves only a coarse comparison'],
             maxHostDriftMs    : [value: 50, source: 'plugin', note: 'Between hosts, measured against the time servers they share'],
             clusterCpuModel   : [value: null, source: 'plugin', note: 'The CPU model this cluster must use (the EVC equivalent). Set it to check the cluster keeps to it'],
@@ -43,6 +43,9 @@ class Standards {
             hungTasksWarn     : [value: 1, source: 'plugin', note: 'Kernel hung-task reports in the last hour'],
             iscsiErrorsWarn   : [value: 1, source: 'plugin', note: 'iSCSI session timeouts and offline-device errors in 24 h'],
             osVersion         : [value: null, source: 'hpe', note: 'Ubuntu release the layout is built for'],
+            certWarnDays      : [value: 30, source: 'plugin', note: 'Days left on a libvirt or appliance certificate that warn'],
+            certFailDays      : [value: 7, source: 'plugin', note: 'Days left on a libvirt or appliance certificate that fail'],
+            trunkAllowedVms   : [value: null, source: 'plugin', note: 'VMs meant to have a trunk port (a list of libvirt domain names), such as a firewall. Morpheus has no record of this'],
     ]
 
     /** Layout-specific baseline. Both token values for 1.3 are what Morpheus writes into corosync.conf on that layout. */
@@ -82,16 +85,47 @@ class Standards {
                 if (!DEFAULTS.containsKey(k)) {
                     throw new IllegalArgumentException("Site standards: unknown key \"${k}\". Known keys: ${DEFAULTS.keySet().join(', ')}")
                 }
+                checkType(k as String, v)
                 out[k as String] = [value: v, source: 'site', note: note]
             }
         }
         apply(site, 'Site standard')
-        Map perLayout = (site.profiles instanceof Map ? (site.profiles as Map)[p] : null) as Map
+        if (site.profiles != null && !(site.profiles instanceof Map && (site.profiles as Map).values().every { it instanceof Map })) {
+            throw new IllegalArgumentException('Site standards: "profiles" must be an object of objects, by layout version')
+        }
+        Map perLayout = (site.profiles as Map)?.get(p) as Map
         if (perLayout) {
             apply(perLayout, "Site standard for HVM ${p}")
         }
+        if (site.disabledChecks != null && !stringList(site.disabledChecks)) {
+            throw new IllegalArgumentException('Site standards: "disabledChecks" must be a list of check ids')
+        }
         Set<String> disabled = ((site.disabledChecks ?: []) as List<String>) as Set<String>
         new Standards(p, out, disabled)
+    }
+
+    private static boolean stringList(Object v) {
+        v instanceof List && (v as List).every { it instanceof String }
+    }
+
+    /** A string where a list belongs becomes single characters, and a word where a number belongs fails every check, so each is refused here, by name. */
+    private static void checkType(String key, Object v) {
+        if (v == null && DEFAULTS[key].value == null) {
+            return
+        }
+        boolean ok
+        if (key in ['ntpServers', 'trunkAllowedVms']) {
+            ok = stringList(v)
+        } else if (key in ['clusterCpuModel', 'osVersion', 'agentMinVersion']) {
+            ok = v instanceof String
+        } else if (DEFAULTS[key].value instanceof Boolean) {
+            ok = v instanceof Boolean
+        } else {
+            ok = v instanceof Number
+        }
+        if (!ok) {
+            throw new IllegalArgumentException("Site standards: \"${key}\" has the wrong type: ${v}")
+        }
     }
 
     private static Map parseSite(String json) {

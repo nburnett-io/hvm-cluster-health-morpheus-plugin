@@ -67,6 +67,9 @@ processResources {
 test {
     useJUnitPlatform()
     testLogging { events 'failed'; exceptionFormat 'full' }
+    // specs read these as files, so a change to one alone has to run them again
+    inputs.dir('src/assets').withPropertyName('tabScripts').withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.files('docs/CHECKS.md').withPropertyName('checksDoc').withPathSensitivity(PathSensitivity.RELATIVE)
 }
 
 jar {
@@ -91,6 +94,11 @@ shadowJar {
     // Only our own classes and resources: everything else is provided by the appliance.
     configurations = []
     archiveClassifier.set('all')
+    // the release is also handed around on its own, so its licence goes with it
+    from(rootDir) {
+        include 'LICENSE', 'NOTICE'
+        into 'META-INF'
+    }
 }
 
 tasks.assemble.dependsOn tasks.shadowJar

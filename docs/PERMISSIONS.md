@@ -14,12 +14,16 @@ A user needs **both**:
 |---|---|---|
 | Cluster Health | Read | The tab, checks, pre-flights, raw probe output |
 | Cluster Health | Full | Safe and maintenance fixes, VLAN tests, defining the cluster's time source |
-| Cluster Health Emergency Actions | Full | Acknowledging a failed node as fenced; safe eject |
+| Cluster Health Emergency Actions | Full | Acknowledging a failed node as fenced; Remove safely |
 
-The all-clusters view is for the master tenant only, whatever a role grants. Findings show which tenants are affected, which is why customers must never reach them.
+The all-clusters page (Operations > Analytics > Cluster Health) is for the master tenant only, whatever a role grants. Findings show which tenants are affected, which is why customers must never reach them. It needs the Cluster Health permission to show any rows, and the role's Analytics access for the menu entry to appear.
+
+The report on a cluster is for that cluster's operators, with Cluster Health Read. It can be handed on, so it holds no tenant data: who a finding affects and the names of tenants, VMs and networks are withheld. Host and storage names stay, so read it before it leaves.
 
 Everyone else gets no tab, and every route refuses them. Morpheus answers 404 for a route the role lacks, and the plugin answers 403 to
-a non-operator whose role does have it.
+a non-operator whose role does have it, the same for a cluster that does not exist. A refusal goes to the appliance's log, not the audit log, whose entries land in the caller's tenant and would name the cluster.
+
+Fixes, VLAN tests, the time source, Remove safely and the acknowledgement answer POST only, so a link cannot run them: a GET carries no CSRF token.
 
 ## In a three-tier Morpheus
 

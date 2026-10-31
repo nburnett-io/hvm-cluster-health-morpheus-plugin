@@ -1,5 +1,6 @@
 package org.hvmhealth
 
+import org.hvmhealth.checks.HealthChecker
 import org.hvmhealth.checks.HealthChecker.Tier
 import org.hvmhealth.fixes.Fixes
 import org.hvmhealth.model.HostFacts
@@ -93,6 +94,34 @@ class FixesSpec extends Specification {
         Fixes.fix('rejoin', f).script.contains('REFUSED: GFS2 is mounted')
     }
 
+    def 'a service running but not enabled is offered the safe fix, and an enabled one nothing'() {
+        given:
+        HealthChecker.Input i = Fixture.healthy()
+        i.hosts[1].facts = Fixture.facts('probe-healthy', 'hvm-node02') { it.replace('dlm|active|enabled', 'dlm|active|disabled').replace(' 5    vm-one   running', '') }
+
+        when:
+        List<HealthChecker.Result> rs = new HealthChecker().check(i).findAll { it.id == 'CLU-02' }
+
+        then:
+        rs.find { it.host == 'hvm-node02' && it.title.startsWith('dlm') }.fix == 'service-enable'
+        rs.find { it.host == 'hvm-node02' && it.title.startsWith('dlm') }.tier == Tier.SAFE
+        rs.find { it.host == 'hvm-node01' && it.title.startsWith('dlm') }.tier == Tier.NONE
+    }
+
+    def 'NTP turned off is a finding with the fix, even while the clock still reads synchronised'() {
+        given:
+        HealthChecker.Input i = Fixture.healthy()
+        i.hosts[1].facts = Fixture.facts('probe-healthy', 'hvm-node02') { it.replace('NTP=yes', 'NTP=no').replace(' 5    vm-one   running', '') }
+
+        when:
+        HealthChecker.Result r = new HealthChecker().check(i).find { it.id == 'TIM-01' && it.host == 'hvm-node02' }
+
+        then:
+        r.status == HealthChecker.Status.WARN
+        r.fix == 'ntp-enable'
+        r.tier == Tier.MAINTENANCE
+    }
+
     def 'service-enable only enables, and only what is already running'() {
         given:
         HostFacts f = Fixture.facts('probe-healthy', 'hvm-node02') { it.replace('dlm|active|enabled', 'dlm|active|disabled') }
@@ -116,7 +145,7 @@ class FixesSpec extends Specification {
 
         where:
         key                     | tier
-        'ntp-enable'            | Tier.SAFE
+        'ntp-enable'            | Tier.MAINTENANCE
         'service-enable'        | Tier.SAFE
         'rejoin'                | Tier.MAINTENANCE
         'multipath-reconfigure' | Tier.MAINTENANCE
@@ -146,6 +175,72 @@ class FixesSpec extends Specification {
 
         then:
         thrown(IllegalArgumentException)
+    }
+
+    def 'on timesyncd, the time source goes in a drop-in, is verified, and comes back out if nothing answers'() {
+        given:
+        HostFacts f = Fixture.facts('probe-timesyncd', 'hvm-node02')
+
+        when:
+        Fixes.Fix fix = Fixes.fix('ntp-sources', f, ['ntp1.example.invalid', '192.0.2.123'])
+
+        then:
+        fix.tier == Tier.MAINTENANCE
+        fix.script.contains("printf '[Time]\\nNTP=ntp1.example.invalid 192.0.2.123\\n' > \"\$f.new\"")
+        fix.script.contains('f=$d/cluster-health.conf')
+        fix.script.contains('d=/etc/systemd/timesyncd.conf.d')
+        fix.script.contains('systemctl restart systemd-timesyncd')
+        fix.script.contains('timedatectl show-timesync -p ServerName --value')
+        fix.script.contains('case " ntp1.example.invalid 192.0.2.123 " in')
+        fix.script.contains('putting the previous configuration back')
+        fix.script.endsWith('exit 1\n')
+        !fix.script.contains('chrony')
+        !fix.script.contains('REFUSED: this host does not use chrony')
+
+        and: 'the OS file stays as shipped, and only timesyncd restarts'
+        !(fix.script =~ /> *\/etc\/systemd\/timesyncd\.conf\b/)
+        (fix.script.findAll(/systemctl\s+restart\s+\S+/) as Set) == ['systemctl restart systemd-timesyncd'] as Set
+    }
+
+    def 'on timesyncd, the fix has the same guards: maintenance mode, a source, and a safe name'() {
+        given:
+        HostFacts f = Fixture.facts('probe-timesyncd', 'hvm-node02')
+        def cluster = { boolean inMaintenance ->
+            Fixture.input((1..3).collect { int n ->
+                String name = "hvm-node0${n}".toString()
+                Fixture.host(name, Fixture.facts('probe-timesyncd', name) { it.replace(' 1   vm-one   running', '') }, [maintenance: n == 2 && inMaintenance])
+            }, Fixture.LAYOUT_13)
+        }
+
+        expect:
+        Fixes.blockers(Fixes.fix('ntp-sources', f, ['ntp1.example.invalid']).tier, cluster(false), 'hvm-node02').any { it.contains('not in maintenance mode') }
+        Fixes.blockers(Fixes.fix('ntp-sources', f, ['ntp1.example.invalid']).tier, cluster(true), 'hvm-node02') == []
+
+        when:
+        Fixes.fix('ntp-sources', f, [])
+
+        then:
+        thrown(IllegalStateException)
+
+        when:
+        Fixes.fix('ntp-sources', f, ['x; rm -rf /'])
+
+        then:
+        thrown(IllegalArgumentException)
+    }
+
+    def 'the time source fix refuses a host running neither daemon, rather than guess'() {
+        when:
+        Fixes.fix('ntp-sources', Fixture.facts('probe-timesyncd', 'x') { it.replace('systemd-timesyncd|active|enabled', 'systemd-timesyncd|inactive|disabled') }, ['ntp1.example.invalid'])
+
+        then:
+        IllegalStateException e = thrown()
+        e.message.contains('Neither chrony nor systemd-timesyncd')
+    }
+
+    def 'a chrony host keeps the chrony way of doing it'() {
+        expect:
+        Fixes.fix('ntp-sources', Fixture.facts('probe-healthy', 'x'), ['ntp1.example.invalid']).script.contains('chronyc reload sources')
     }
 
     def 'an unknown fix is refused'() {

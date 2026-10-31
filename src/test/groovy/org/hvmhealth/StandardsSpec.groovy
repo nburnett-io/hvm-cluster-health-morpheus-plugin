@@ -83,5 +83,40 @@ class StandardsSpec extends Specification {
         '{not json'         | 'not valid JSON'
         '[1,2]'             | 'JSON object'
         '{"gfs2WarnPc":70}' | 'unknown key'
+        '{"quorumFencing":false}' | 'unknown key'
+    }
+
+    def 'a value of the wrong type is an error naming the key, not single characters or a failure on every cluster'() {
+        when:
+        Standards.forLayout(Layout.of(Fixture.LAYOUT_20), json)
+
+        then:
+        IllegalArgumentException e = thrown()
+        e.message.contains(says)
+
+        where:
+        json                                            | says
+        '{"ntpServers":"192.0.2.1"}'                    | 'ntpServers'
+        '{"ntpServers":[1,2]}'                          | 'ntpServers'
+        '{"gfs2WarnPct":"high"}'                        | 'gfs2WarnPct'
+        '{"gfs2WarnPct":null}'                          | 'gfs2WarnPct'
+        '{"mpio":"yes"}'                                | 'mpio'
+        '{"trunkAllowedVms":"vm-a"}'                    | 'trunkAllowedVms'
+        '{"osVersion":26.04}'                           | 'osVersion'
+        '{"disabledChecks":"PKG-01"}'                   | 'disabledChecks'
+        '{"profiles":"2.0"}'                            | 'profiles'
+        '{"profiles":{"2.0":{"gfs2FailPct":"lots"}}}'   | 'gfs2FailPct'
+    }
+
+    def 'values of the right type are taken, and a pin can be cleared with null'() {
+        when:
+        Standards s = Standards.forLayout(Layout.of(Fixture.LAYOUT_13), '{"gfs2WarnPct":75,"consensusRatio":1.5,"mpio":false,"ntpServers":["192.0.2.1"],"trunkAllowedVms":["vm-a"],"osVersion":"24.04","corosyncToken":null,"disabledChecks":["PKG-01"]}')
+
+        then:
+        s.intVal('gfs2WarnPct') == 75
+        s.val('mpio') == false
+        s.val('ntpServers') == ['192.0.2.1']
+        s.val('corosyncToken') == null
+        s.disabledChecks == ['PKG-01'] as Set
     }
 }

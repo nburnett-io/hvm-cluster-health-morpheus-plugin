@@ -1,0 +1,213 @@
+@@meta
+HOSTNAME=hvm-node02
+NOW=1793461921
+BOOT=1793457791
+KERNEL=6.8.0-138-generic
+OS_VERSION=24.04
+LOAD1=0.35
+NPROC=4
+REBOOT_REQUIRED=0
+HVMCLI=
+MODE=full
+@@services
+corosync|active|enabled
+dlm|active|enabled
+pacemaker|inactive|not-found
+pcsd|inactive|not-found
+libvirtd|active|enabled
+multipathd|active|enabled
+iscsid|active|disabled
+chrony|inactive|not-found
+systemd-timesyncd|active|enabled
+morpheus-morphd|active|enabled
+@@corosync_conf
+# MORPHEUS MANAGED
+# morpheus_version: 1.3
+# morpheus_config_rev: 2
+totem {
+    version: 2
+    config_version: 3
+    cluster_name: cluster-c
+    transport: knet
+    token: 60000
+    consensus: 72000
+    join: 10000
+}
+
+nodelist {
+    node {
+        ring0_addr: 192.0.2.1
+        name: hvm-node01
+        nodeid: 1
+    }
+
+    node {
+        ring0_addr: 192.0.2.2
+        name: hvm-node02
+        nodeid: 2
+    }
+
+    node {
+        ring0_addr: 192.0.2.3
+        name: hvm-node03
+        nodeid: 3
+    }
+
+}
+
+quorum {
+    provider: corosync_votequorum
+}
+@@corosync_key
+0123456789abcdef
+@@quorum
+Quorum information
+------------------
+Quorum provider:  corosync_votequorum
+Nodes:            3
+Node ID:          2
+Quorate:          Yes
+
+Votequorum information
+----------------------
+Expected votes:   3
+Highest expected: 3
+Total votes:      3
+Quorum:           2
+Flags:            Quorate
+
+Membership information
+----------------------
+    Nodeid      Votes Name
+         1          1 hvm-node01
+         2          1 hvm-node02 (local)
+         3          1 hvm-node03
+@@links
+Local node ID 2, transport knet
+LINK ID 0 udp
+	addr	= 192.0.2.2
+	status:
+		nodeid:          1:	connected
+		nodeid:          2:	localhost
+		nodeid:          3:	connected
+@@totem
+runtime.config.totem.consensus (u32) = 72000
+runtime.config.totem.token (u32) = 60000
+@@dlm_ls
+dlm lockspaces
+name          ds_13
+id            0xd5019f43
+flags         0x00000000
+change        member 3 joined 1 remove 0 failed 0 seq 1,1
+members       1 2 3
+@@dlm_status
+cluster nodeid 2 quorate 1 ring seq 22 22
+daemon now 4130 fence_pid 0
+node 1 M add 489 rem 0 fail 0 fence 0 at 0 0
+node 2 M add 489 rem 0 fail 0 fence 0 at 0 0
+node 3 M add 489 rem 0 fail 0 fence 0 at 0 0
+@@dlm_conf
+enable_fencing=1
+enable_quorum_fencing=0
+enable_quorum_lockspace=0
+@@fence_acks
+@@gfs2
+MOUNT=/dev/mapper/360014059aaaaaaaaaaaaaaaaaaaaaaaa|/mnt/11111111-2222-3333-4444-555555555555
+TABLE=cluster-c:ds_13|0|0
+FS_SAFE=1
+@@gfs2_fs
+FS_TIMEOUT=0
+USAGE=/mnt/11111111-2222-3333-4444-555555555555|107367006208|3284525056
+IN_USE=/mnt/11111111-2222-3333-4444-555555555555|1
+HB=hvm-node01|1793461913384
+HB=hvm-node02|1793461912235
+HB=hvm-node03|1793461913100
+GFS_STAT=/mnt/11111111-2222-3333-4444-555555555555|7
+@@stuck
+D_COUNT=0
+D_OLDEST=0
+HUNG_1H=0
+@@vms
+ 1   vm-one   running
+@@vm_ops
+STATE_LOCK_15M=0
+AGENT_KILLS_15M=0
+@@multipath
+360014059aaaaaaaaaaaaaaaaaaaaaaaa dm-0 LIO-ORG,examplelun
+size=100G features='1 queue_if_no_path' hwhandler='1 alua' wp=rw
+`-+- policy='service-time 0' prio=50 status=active
+  |- 6:0:0:0 sda 8:0 active ready running
+  `- 7:0:0:0 sdb 8:16 active ready running
+@@multipath_queue
+MP_QUEUE=360014059aaaaaaaaaaaaaaaaaaaaaaaa|12 chk
+@@iscsi
+PORTAL_DEV=198.51.100.86|mgmt
+SESSIONS=2
+ERRORS_24H=0
+@@links_net
+lo|65536|UNKNOWN
+eth0|1500|UP
+ovs-system|1500|DOWN
+mgmt|1500|UNKNOWN
+@@bonds
+@@addrs
+ADDR=mgmt|192.0.2.2/24
+@@ring
+RING_DEV=mgmt
+RING_ADDR=192.0.2.2
+PEER=192.0.2.1|0|0.25|1|1|1500
+PEER=192.0.2.3|0|0.31|1|1|1500
+@@vlans
+@@storage
+@@layout
+OVS_BRIDGES=mgmt,
+VIRTSWITCH_FILES=0
+NETPLAN_FILES=01-base.yaml,60-mvm-mgmt.yaml,
+@@lldp
+LLDPCLI=
+LLDPD=inactive
+@@time
+NTP=yes
+NTP_SYNCED=yes
+CHRONY=
+CHRONY_FOLLOWING=
+TS_SERVER=203.0.113.57 (ntp.ubuntu.com)
+TS_LEAP=normal
+TS_STRATUM=2
+TS_OFFSET=+5.093ms
+TS_PACKETS=6
+TS_LINK=
+TS_SYSTEM=
+TS_RUNTIME=
+TS_FALLBACK=ntp.ubuntu.com
+@@cpu
+CPU_MODEL=Example CPU 3000
+CPU_FLAGS=08dd0072dea29009
+LIBVIRT_CPU=Skylake-Server
+USABLE_CPUS=Skylake-Server,
+MEM_TOTAL_KB=95093324
+MEM_AVAIL_KB=91083840
+@@pools
+ local                  active   yes
+ ds-13                  active   yes
+@@packages
+corosync|3.1.7-1ubuntu3.2
+dlm-controld|4.2.0-3build1
+gfs2-utils|3.5.1-1
+libvirt-daemon-system|10.0.0-2ubuntu8.19
+qemu-system-x86|1:8.2.2+ds-0ubuntu1.18
+open-iscsi|2.1.9-3ubuntu5.4
+multipath-tools|0.9.4-5ubuntu8.2
+morpheus-agent|4.0.1
+@@journals
+JOURNALS=/dev/mapper/360014059aaaaaaaaaaaaaaaaaaaaaaaa|3
+@@bmc
+IPMITOOL=
+BMC_IP=
+WATCHDOG=
+@@hardware
+HW_PRODUCT=Server X
+HW_BIOS=1.0
+HW_BMC=
+@@end
+COMPLETE=1

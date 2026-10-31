@@ -6,6 +6,7 @@ import com.morpheusdata.model.OptionType
 import com.morpheusdata.model.Permission
 import com.morpheusdata.views.HandlebarsRenderer
 import groovy.json.JsonSlurper
+import org.hvmhealth.morpheus.HealthAnalyticsProvider
 import org.hvmhealth.morpheus.HealthController
 import org.hvmhealth.morpheus.HealthMonitor
 import org.hvmhealth.morpheus.HealthTabProvider
@@ -51,13 +52,13 @@ class ClusterHealthPlugin extends Plugin {
                         helpText: 'Adds ring latency, journal counts and management controllers. 0 runs only quick checks automatically.'),
                 new OptionType(name: 'Fix safe findings automatically', code: 'hvm-health.autoFixSafe', fieldName: 'autoFixSafe',
                         fieldLabel: 'Fix safe findings automatically', inputType: OptionType.InputType.CHECKBOX, defaultValue: 'off', displayOrder: 20,
-                        helpText: 'Applies fixes with no effect on the cluster (turning on NTP, enabling a running service at boot) without asking. Each is audited.'),
+                        helpText: 'Applies fixes with no effect on the cluster (enabling a running service at boot) without asking. Each is audited.'),
                 new OptionType(name: 'Fix findings on hosts in maintenance automatically', code: 'hvm-health.autoFixMaintenance', fieldName: 'autoFixMaintenance',
                         fieldLabel: 'Fix findings on hosts in maintenance automatically', inputType: OptionType.InputType.CHECKBOX, defaultValue: 'off', displayOrder: 30,
                         helpText: 'Applies fixes that could disturb the cluster, only on a host already in maintenance mode, with no VMs, one host at a time, when the cluster keeps quorum without it. Clearing a frozen datastore is never automatic.'),
-                new OptionType(name: 'Enable safe eject', code: 'hvm-health.enableEject', fieldName: 'enableEject',
-                        fieldLabel: 'Enable safe eject', inputType: OptionType.InputType.CHECKBOX, defaultValue: 'off', displayOrder: 35,
-                        helpText: 'Lets a person take a host in maintenance mode out of the cluster from its pre-flight: unmount GFS2, stop dlm and corosync, remove it from corosync.conf on the rest. Not yet proven on every layout: try it on a test cluster first.'),
+                new OptionType(name: 'Clusters automatic fixes apply to', code: 'hvm-health.autoFixClusters', fieldName: 'autoFixClusters',
+                        fieldLabel: 'Clusters automatic fixes apply to', inputType: OptionType.InputType.TEXT, displayOrder: 32,
+                        helpText: 'Ids or names of the clusters (comma separated) that the two automatic switches apply to. Empty means none, so turning a switch on does nothing until a cluster is named. A number is always an id. A name applies to every cluster with that name, in any tenant, so use ids where that matters.'),
                 new OptionType(name: 'Site standards', code: 'hvm-health.siteStandards', fieldName: 'siteStandards',
                         fieldLabel: 'Site standards', inputType: OptionType.InputType.TEXTAREA, displayOrder: 40,
                         helpText: 'JSON overriding the built-in standards, for all layouts or per layout. Example: {"gfs2WarnPct": 75, "profiles": {"2.0": {"corosyncToken": 30000}}, "disabledChecks": ["PKG-01"]}. The tab lists every key and where each value came from.'),
@@ -67,6 +68,7 @@ class ClusterHealthPlugin extends Plugin {
         ]
 
         registerProvider(new HealthTabProvider(this, morpheus))
+        registerProvider(new HealthAnalyticsProvider(this, morpheus))
         HealthController controller = new HealthController(this, morpheus)
         registerProvider(controller)
         controllers.add(controller)

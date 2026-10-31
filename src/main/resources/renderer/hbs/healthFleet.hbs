@@ -1,0 +1,9 @@
+{{#if allowed}}
+<div class="hh-page" data-hh-page="fleet">
+  <div class="hh-page-body hh-muted">Loading… (if this never changes, the page script was blocked: check the browser console)</div>
+</div>
+<script src="{{asset "/health-tab.js"}}?v=@PLUGIN_VERSION@" nonce="{{nonce}}"></script>
+<script src="{{asset "/health-pages.js"}}?v=@PLUGIN_VERSION@" nonce="{{nonce}}"></script>
+{{else}}
+<div class="hh-page">This view is for the master tenant.</div>
+{{/if}}

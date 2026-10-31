@@ -306,6 +306,22 @@ class HealthCheckerSpec extends Specification {
         check(withAddrs(['hvm-node01': ['iscsia|192.0.2.1/24'], 'hvm-node02': ['iscsia|198.51.100.2/25']])).find { it.id == 'NET-10' }.status == Status.FAIL
     }
 
+    def 'a /32 VIP a host holds inside its own /24 is not a different netmask'() {
+        expect:
+        check(withAddrs(['hvm-node01': ['mgmt|192.0.2.1/24', 'mgmt|192.0.2.50/32'], 'hvm-node02': ['mgmt|192.0.2.2/24']])).find { it.id == 'NET-10' }.status == Status.PASS
+    }
+
+    def 'a real difference still shows beside a VIP'() {
+        when:
+        HealthChecker.Result r = check(withAddrs(['hvm-node01': ['mgmt|192.0.2.1/24', 'mgmt|192.0.2.50/32'], 'hvm-node02': ['mgmt|192.0.2.2/23']])).find { it.id == 'NET-10' }
+
+        then:
+        r.status == Status.FAIL
+        r.observed.contains('hvm-node01 mgmt /24')
+        r.observed.contains('hvm-node02 mgmt /23')
+        !r.observed.contains('/32')
+    }
+
     def 'different networks on different interfaces are not counterparts'() {
         expect:
         check(withAddrs(['hvm-node01': ['mgmt|192.0.2.1/24', 'iscsia|198.51.100.1/25'], 'hvm-node02': ['mgmt|192.0.2.2/24']])).find { it.id == 'NET-10' }.status == Status.PASS
@@ -502,7 +518,7 @@ class HealthCheckerSpec extends Specification {
         then:
         rs.find { it.id == 'HB-01' && it.host == 'hvm-node02' }.status == Status.NA
         rs.find { it.id == 'HA-02' }.status == Status.WARN
-        rs.find { it.id == 'HA-02' }.hint.contains('freezes every GFS2 datastore')
+        rs.find { it.id == 'HA-02' }.hint.contains('stalls every GFS2 datastore')
     }
 
     def 'a host out of maintenance with no heartbeat warns, as it can be just back, and a stale one fails'() {
@@ -515,13 +531,373 @@ class HealthCheckerSpec extends Specification {
         check(stale).find { it.id == 'HB-01' && it.host == 'hvm-node02' }.status == Status.FAIL
     }
 
-    def 'the HA flag on the cluster record is reported'() {
+    def 'the HA flag on the cluster record is a note with its raw value, and raises nothing until it is understood'() {
         given:
-        HealthChecker.Input i = oneHost { it }
-        i.clusterConfig = [notHighAvailability: true]
+        HealthChecker.Input i = Fixture.healthy('{"ntpServers":["ntp1.example.invalid"]}')
+        i.clusterConfig = [notHighAvailability: value]
+
+        when:
+        List<HealthChecker.Result> rs = check(i)
+        HealthChecker.Result r = rs.find { it.id == 'HA-01' }
+
+        then:
+        r.status == Status.NA
+        r.observed == "cluster config has notHighAvailability=${value}".toString()
+        HealthChecker.overall(rs) == 'HEALTHY'
+        !org.hvmhealth.morpheus.HealthMonitor.alarmsFor(1L, 'c', rs).any { it.name.startsWith('HA-01') }
+
+        where:
+        value << [true, false, 'on']
+    }
+
+    def 'with no HA flag on the cluster record, nothing is said about it'() {
+        expect:
+        !check(oneHost { it }).any { it.id == 'HA-01' }
+    }
+
+    // ------------------------------------------------------------------ a 1.3 host on systemd-timesyncd
+
+    def 'the sample from a real 1.3 host parses to what the time checks read'() {
+        when:
+        HostFacts f = Fixture.facts('probe-timesyncd', 'hvm-node02')
+
+        then:
+        f.timeDaemon == 'timesyncd'
+        f.timesyncd == [addr: '203.0.113.57', name: 'ntp.ubuntu.com', offsetMs: 5.093G, packets: 6L, stratum: 2, leap: 'normal']
+        f.timeFollowing == 'ntp.ubuntu.com'
+        f.timeServers == ['ntp.ubuntu.com']
+        f.timeSamples == [[addr: '203.0.113.57', offsetMs: 5.093G]]
+        !f.chrony
+    }
+
+    def 'a chrony host ignores what timesyncd files say'() {
+        when:
+        HostFacts f = Fixture.facts('probe-healthy', 'hvm-node02') { it.replace('CONF_SERVER=', 'CONF_TIMESYNCD=NTP=other.example.invalid\nCONF_SERVER=') }
+
+        then:
+        f.timeDaemon == 'chrony'
+        f.timesyncd == null
+        f.timeServers == ['ntp1.example.invalid']
+    }
+
+    def 'an IPv6 time server keeps its whole address'() {
+        expect:
+        Fixture.facts('probe-timesyncd', 'x') { it.replace('TS_SERVER=203.0.113.57 (ntp.ubuntu.com)', 'TS_SERVER=2001:db8::40 (ntp.ubuntu.com)') }.timesyncd.addr == '2001:db8::40'
+    }
+
+    def 'systemd time spans read in milliseconds'() {
+        expect:
+        HostFacts.timespanMs(text) == want
+
+        where:
+        text           | want
+        '+5.093ms'     | 5.093G
+        '-120us'       | -0.120G
+        '+1.5s'        | 1500G
+        '-1min 2.5s'   | -62500G
+        '0'            | 0G
+        ''             | null
+        null           | null
+        'soon'         | null
+    }
+
+    def 'timesyncd servers come from its own report, then its files, then its fallback'() {
+        given:
+        Closure<HostFacts> f = { String lines -> Fixture.facts('probe-timesyncd', 'x') { it.replace('TS_FALLBACK=ntp.ubuntu.com', lines) } }
+
+        expect: 'the fallback on a stock host, which configures nothing'
+        f('TS_FALLBACK=ntp.ubuntu.com').timeServers == ['ntp.ubuntu.com']
+
+        and: 'what it reports'
+        Fixture.facts('probe-timesyncd', 'x') { it.replace('TS_SYSTEM=', 'TS_SYSTEM=ntp2.example.invalid ntp1.example.invalid') }.timeServers == ['ntp1.example.invalid', 'ntp2.example.invalid']
+
+        and: 'its files, if it reported nothing, where an empty NTP= resets what came before and NTP= outranks the fallback'
+        f('CONF_TIMESYNCD=NTP=old.example.invalid\nCONF_TIMESYNCD=NTP=\nCONF_TIMESYNCD=NTP=ntp1.example.invalid\nCONF_TIMESYNCD=FallbackNTP=fb.example.invalid').timeServers == ['ntp1.example.invalid']
+        f('CONF_TIMESYNCD=FallbackNTP=fb.example.invalid').timeServers == ['fb.example.invalid']
+
+        and: 'at the very least, the server it is reading'
+        f('').timeServers == ['ntp.ubuntu.com']
+    }
+
+    def 'a synced timesyncd host reads as following its server, not as following nothing'() {
+        when:
+        List<HealthChecker.Result> rs = check(Fixture.timesyncd())
+        HealthChecker.Result tim3 = rs.find { it.id == 'TIM-03' && it.host == 'hvm-node01' }
+        HealthChecker.Result tim4 = rs.find { it.id == 'TIM-04' && it.host == 'hvm-node01' }
+
+        then:
+        tim3.status == Status.PASS
+        tim3.observed == '5.1 ms from ntp.ubuntu.com (203.0.113.57) at its last poll, stratum 2, normal'
+        tim4.status == Status.NA
+        tim4.observed == 'OS default: following ntp.ubuntu.com via systemd-timesyncd; configured ntp.ubuntu.com'
+        rs.find { it.id == 'TIM-06' }.observed == 'none defined; hosts follow the OS default public servers'
+        Fixture.failing(rs).isEmpty()
+    }
+
+    def 'a timesyncd host is held to the cluster time source like any other'() {
+        given:
+        Closure<String> onIt = { String t, String h -> t.replace('TS_SYSTEM=', 'TS_SYSTEM=ntp1.example.invalid').replace('(ntp.ubuntu.com)', '(ntp1.example.invalid)') }
+        Closure<String> elsewhere = { String t, String h -> t.replace('TS_SYSTEM=', 'TS_SYSTEM=ntp1.example.invalid other.example.invalid').replace('(ntp.ubuntu.com)', '(other.example.invalid)') }
+        String site = '{"ntpServers":["ntp1.example.invalid"]}'
+
+        expect: 'using it'
+        check(Fixture.timesyncd(site, onIt)).find { it.id == 'TIM-04' }.status == Status.PASS
+
+        and: 'configured but reading another'
+        HealthChecker.Result other = check(Fixture.timesyncd(site, elsewhere)).find { it.id == 'TIM-04' }
+        other.status == Status.WARN
+        other.hint.contains('systemd-timesyncd is following another server')
+
+        and: 'not using it, with the fix offered'
+        HealthChecker.Result not = check(Fixture.timesyncd(site)).find { it.id == 'TIM-04' }
+        not.status == Status.FAIL
+        not.fix == 'ntp-sources'
+        not.tier == Tier.MAINTENANCE
+    }
+
+    def 'timesyncd with no server answering fails, and with no status says it cannot tell'() {
+        when:
+        HealthChecker.Result silent = check(Fixture.timesyncd(null) { String t, String h -> t.replace('TS_SERVER=203.0.113.57 (ntp.ubuntu.com)', 'TS_SERVER=n/a (ntp.ubuntu.com)').replace('TS_PACKETS=6', 'TS_PACKETS=0').replaceAll(/TS_OFFSET=.*\n/, '') }).find { it.id == 'TIM-03' }
+        HealthChecker.Result unread = check(Fixture.timesyncd(null) { String t, String h -> t.replaceAll(/TS_(SERVER|OFFSET|PACKETS|LEAP|STRATUM)=.*\n/, '') }).find { it.id == 'TIM-03' }
+
+        then:
+        silent.status == Status.FAIL
+        silent.observed.contains('no time server has answered')
+        unread.status == Status.NOT_CHECKED
+        unread.observed.startsWith('cannot tell')
+    }
+
+    def 'a large timesyncd offset warns rather than fails, as it is one sample already corrected'() {
+        when:
+        HealthChecker.Result r = check(Fixture.timesyncd(null) { String t, String h -> t.replace('TS_OFFSET=+5.093ms', 'TS_OFFSET=-250ms') }).find { it.id == 'TIM-03' }
+
+        then:
+        r.status == Status.WARN
+        r.observed.startsWith('250.0 ms from')
+    }
+
+    private static HealthChecker.Input timesyncdServers(Map<String, List<String>> addrAndOffset) {
+        Fixture.timesyncd(null) { String t, String h ->
+            List<String> v = addrAndOffset[h]
+            t.replace('203.0.113.57', v[0]).replace('+5.093ms', v[1])
+        }
+    }
+
+    def 'hosts reading the same server are compared directly'() {
+        when:
+        HealthChecker.Input i = timesyncdServers(['hvm-node01': ['203.0.113.1', '+1ms'], 'hvm-node02': ['203.0.113.1', '+3ms'], 'hvm-node03': ['203.0.113.1', '+2ms']])
+        HealthChecker.Result r = check(i).find { it.id == 'TIM-02' }
+
+        then:
+        r.status == Status.PASS
+        r.observed == '2.0 ms apart, measured against 1 shared time server(s)'
+        r.hint == null
+        HealthChecker.timeView(i).driftMs == 2.0
+    }
+
+    def 'hosts apart on one server warn rather than fail, as these are single samples'() {
+        when:
+        HealthChecker.Result r = check(timesyncdServers(['hvm-node01': ['203.0.113.1', '-40ms'], 'hvm-node02': ['203.0.113.1', '+40ms'], 'hvm-node03': ['203.0.113.1', '+1ms']])).find { it.id == 'TIM-02' }
+
+        then:
+        r.status == Status.WARN
+        r.observed.startsWith('80.0 ms apart')
+        r.hint.contains('single samples')
+    }
+
+    def 'hosts on different members of a pool are no alarm, and it is said what that leaves unknown'() {
+        when:
+        HealthChecker.Input i = timesyncdServers(['hvm-node01': ['203.0.113.1', '+40ms'], 'hvm-node02': ['203.0.113.2', '-40ms'], 'hvm-node03': ['203.0.113.3', '+1ms']])
+        List<HealthChecker.Result> rs = check(i)
+        HealthChecker.Result r = rs.find { it.id == 'TIM-02' }
+
+        then: 'same configured name, so not a difference in configuration either'
+        r.status == Status.PASS
+        r.observed.contains('coarse')
+        r.hint.contains('hvm-node01 is 40.0 ms from 203.0.113.1')
+        r.hint.contains('neither drift nor agreement')
+        !rs.any { it.id == 'TIM-05' }
+        HealthChecker.timeView(i).driftMs == null
+        HealthChecker.timeView(i).driftNote.contains('neither drift nor agreement')
+        HealthChecker.timeView(i).hosts*.offsetMs == [40.0, 40.0, 1.0]
+        HealthChecker.timeView(i).hosts*.daemon == ['timesyncd', 'timesyncd', 'timesyncd']
+    }
+
+    def 'one host on another pool member is left out of the comparison, and named'() {
+        when:
+        HealthChecker.Result r = check(timesyncdServers(['hvm-node01': ['203.0.113.1', '+1ms'], 'hvm-node02': ['203.0.113.1', '+3ms'], 'hvm-node03': ['203.0.113.9', '+90ms']])).find { it.id == 'TIM-02' }
+
+        then:
+        r.status == Status.PASS
+        r.observed.startsWith('2.0 ms apart')
+        r.observed.contains('across all hosts (coarse)')
+        r.hint.contains('hvm-node03 is 90.0 ms from 203.0.113.9')
+    }
+
+    def 'two groups on different servers are measured within each, never across'() {
+        given:
+        HealthChecker.Input i = Fixture.input((1..4).collect { int n ->
+            String name = "hvm-node0${n}".toString()
+            Fixture.host(name, Fixture.facts('probe-timesyncd', name) { String t ->
+                t.replace('203.0.113.57', n < 3 ? '203.0.113.1' : '203.0.113.2').replace('+5.093ms', ['+1ms', '+2ms', '+90ms', '+94ms'][n - 1]).replace(' 1   vm-one   running', '')
+            })
+        }, Fixture.LAYOUT_13)
+
+        when:
+        Map drift = HealthChecker.hostDrift(i.hosts)
+        HealthChecker.Result r = check(i).find { it.id == 'TIM-02' }
+
+        then: 'the wider group is 4 ms apart, not the 93 ms between groups, which nothing measured'
+        drift.spreadMs == 4
+        drift.groups.size() == 2
+        r.status == Status.PASS
+        r.hint.contains('Compared only within hvm-node01, hvm-node02; and within hvm-node03, hvm-node04')
+    }
+
+    def 'a chrony host and a timesyncd host reading one server are still compared'() {
+        given:
+        HealthChecker.Input i = Fixture.input([
+                Fixture.host('hvm-node01', Fixture.facts('probe-healthy', 'hvm-node01') { it.replace(' 5    vm-one   running', '') }),
+                Fixture.host('hvm-node02', Fixture.facts('probe-timesyncd', 'hvm-node02') { it.replace('203.0.113.57', '192.0.2.123').replace('+5.093ms', '-0.4ms').replace(' 1   vm-one   running', '') })], Fixture.LAYOUT_13)
 
         expect:
-        check(i).find { it.id == 'HA-01' }.status == Status.WARN
+        HealthChecker.hostDrift(i.hosts).spreadMs == 0
+    }
+
+    // ------------------------------------------------------------------ multipath queueing
+
+    private static HealthChecker.Result queueing(String queueLine, String features = '1 queue_if_no_path') {
+        check(Fixture.timesyncd(null) { String t, String h ->
+            t.replace('MP_QUEUE=360014059aaaaaaaaaaaaaaaaaaaaaaaa|12 chk', queueLine).replace("features='1 queue_if_no_path'", "features='${features}'".toString())
+        }).find { it.id == 'STO-02' }
+    }
+
+    def 'only endless queueing is the finding: multipathd says, not the dm features line'() {
+        when:
+        HealthChecker.Result r = queueing("MP_QUEUE=360014059aaaaaaaaaaaaaaaaaaaaaaaa|${value}".toString())
+
+        then:
+        r.status == status
+        r.observed == observed
+
+        where:
+        value    | status      | observed
+        '12 chk' | Status.PASS | 'finite retry: 12 chk'
+        '30 sec' | Status.PASS | 'finite retry: 30 sec'
+        'off'    | Status.PASS | 'queueing off'
+        'on'     | Status.WARN | 'queueing on, with no limit'
+    }
+
+    def 'with no limit to read, the dm features line alone never claims endless queueing'() {
+        expect:
+        queueing(line).status == Status.NOT_CHECKED
+        queueing(line).observed.startsWith('cannot tell')
+        queueing(line, '0').status == Status.PASS
+        queueing(line, '0').observed == 'not queueing'
+
+        where:
+        line << ['', 'MP_QUEUE=360014059aaaaaaaaaaaaaaaaaaaaaaaa|-']
+    }
+
+    // ------------------------------------------------------------------ ipmitool
+
+    def 'a missing ipmitool reads as cannot tell, never as missing hardware, and the readiness says not checked'() {
+        when:
+        List<HealthChecker.Result> rs = check(Fixture.timesyncd())
+        Map<String, Map> ready = HealthChecker.readiness(rs).collectEntries { [(it.area): it] }
+
+        then:
+        rs.findAll { it.id == 'FEN-01' }*.status.every { it == Status.NOT_CHECKED }
+        rs.findAll { it.id == 'FEN-01' }*.observed.every { it == 'cannot tell: ipmitool not installed' }
+        ['HW-01', 'HW-03', 'HW-04'].every { String id -> rs.findAll { it.id == id }*.status == [Status.NOT_CHECKED] * 3 }
+        rs.find { it.id == 'HW-01' }.hint.contains('Install it')
+        ready['Hardware'].status == 'NOT_CHECKED'
+        ready['Hardware'].notChecked == ['HW-01', 'HW-03', 'HW-04']
+        'FEN-01' in ready['High availability'].notChecked
+        org.hvmhealth.morpheus.HealthMonitor.alarmsFor(1L, 'c', rs.findAll { it.status == Status.NOT_CHECKED }) == []
+    }
+
+    def 'with ipmitool, no management controller is the real answer none, and no sensors is said'() {
+        when:
+        List<HealthChecker.Result> rs = check(Fixture.timesyncd(null) { String t, String h -> t.replace('IPMITOOL=', 'IPMITOOL=/usr/bin/ipmitool') })
+
+        then:
+        rs.find { it.id == 'FEN-01' }.status == Status.WARN
+        rs.find { it.id == 'FEN-01' }.observed == 'none'
+        rs.find { it.id == 'HW-01' }.status == Status.NOT_CHECKED
+        rs.find { it.id == 'HW-01' }.observed == 'cannot tell: ipmitool read no such sensors here'
+        !rs.any { it.id == 'HW-04' }
+    }
+
+    def 'a quick check, which does not look for ipmitool, says nothing about it'() {
+        expect:
+        !check(Fixture.timesyncd(null) { String t, String h -> t.replace('MODE=full', 'MODE=quick').replaceAll(/(?s)@@journals.*?@@end/, '@@end') }).any { it.id in ['FEN-01', 'HW-01', 'HW-03', 'HW-04'] }
+    }
+
+    def 'a management controller ipmitool reads still passes'() {
+        expect:
+        check(Fixture.timesyncd(null) { String t, String h -> t.replace('IPMITOOL=', 'IPMITOOL=/usr/bin/ipmitool').replace('BMC_IP=', 'BMC_IP=203.0.113.5') }).find { it.id == 'FEN-01' }.status == Status.PASS
+    }
+
+    def 'an area with passes stays OK, with what was not checked beside it, and nothing at all reads NA'() {
+        given:
+        List<HealthChecker.Result> rs = [
+                new HealthChecker.Result('HW-02', 'mem', HealthChecker.Severity.HIGH, Status.PASS, 'a', 'ok', 'ok'),
+                new HealthChecker.Result('HW-01', 'psu', HealthChecker.Severity.HIGH, Status.NOT_CHECKED, 'a', 'cannot tell', 'ok')]
+
+        when:
+        Map<String, Map> ready = HealthChecker.readiness(rs).collectEntries { [(it.area): it] }
+
+        then:
+        ready['Hardware'].status == 'PASS'
+        ready['Hardware'].notChecked == ['HW-01']
+        ready['Network'].status == 'NA'
+    }
+
+    // ------------------------------------------------------------------ the agent's version
+
+    private static HealthChecker.Result agent(Map<String, String> versions) {
+        check(Fixture.timesyncd(null) { String t, String h ->
+            versions[h] ? t.replace('morpheus-agent|4.0.1', "morpheus-agent|${versions[h]}".toString()) : t.replace('morpheus-agent|4.0.1\n', '')
+        }).find { it.title == 'Same Morpheus agent on every host' }
+    }
+
+    def 'the agent version is compared, from where the agent really lives'() {
+        expect:
+        agent(['hvm-node01': '4.0.1', 'hvm-node02': '4.0.1', 'hvm-node03': '4.0.1']).status == Status.PASS
+        agent(['hvm-node01': '4.0.1', 'hvm-node02': '4.0.1', 'hvm-node03': '4.0.1']).observed == '4.0.1 on every host'
+        agent(['hvm-node01': '4.0.1', 'hvm-node02': '4.0.2', 'hvm-node03': '4.0.1']).status == Status.WARN
+        agent(['hvm-node01': '4.0.1', 'hvm-node02': '4.0.2', 'hvm-node03': '4.0.1']).observed == 'hvm-node01=4.0.1, hvm-node02=4.0.2, hvm-node03=4.0.1'
+    }
+
+    def 'an agent version that cannot be read is not checked, rather than a quiet pass'() {
+        expect:
+        agent([:]).status == Status.NOT_CHECKED
+        agent([:]).observed.contains('cannot tell for hvm-node01, hvm-node02, hvm-node03')
+        agent(['hvm-node01': '4.0.1', 'hvm-node03': '4.0.1']).status == Status.NOT_CHECKED
+        agent(['hvm-node01': '4.0.1', 'hvm-node03': '4.0.1']).observed == 'hvm-node01=4.0.1, hvm-node03=4.0.1; cannot tell for hvm-node02: no agent version found on the host'
+    }
+
+    def 'an agent installed as a package still counts'() {
+        expect:
+        check(Fixture.healthy()).find { it.title == 'Same Morpheus agent on every host' }.observed == '4.0.1 on every host'
+    }
+
+    def 'the management bridge is listed without the probe trailing comma'() {
+        expect:
+        check(Fixture.timesyncd()).find { it.id == 'LAY-05' }.observed == 'mgmt'
+        check(Fixture.frozen()).find { it.id == 'LAY-05' }.observed == 'compute, mgmt'
+    }
+
+    def 'a healthy 1.3 cluster on timesyncd has nothing failing'() {
+        when:
+        List<HealthChecker.Result> rs = check(Fixture.timesyncd())
+
+        then:
+        Fixture.failing(rs).isEmpty()
+        HealthChecker.overall(rs) in ['HEALTHY', 'WARNING']
+        !Fixture.warning(rs).contains('STO-02')
+        !Fixture.warning(rs).contains('FEN-01')
     }
 
     def 'readiness answers each question with its worst status'() {

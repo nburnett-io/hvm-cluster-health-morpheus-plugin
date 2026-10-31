@@ -10,6 +10,7 @@ import com.morpheusdata.web.PluginController
 import com.morpheusdata.web.Route
 import groovy.util.logging.Slf4j
 import org.hvmhealth.ClusterHealthPlugin
+import org.hvmhealth.checks.CheckCatalog
 import org.hvmhealth.checks.HealthChecker
 import org.hvmhealth.fixes.Fixes
 import org.hvmhealth.fixes.Preflight
@@ -19,6 +20,7 @@ import org.hvmhealth.standards.Standards
 /**
  * Routes under /plugin/hvm-health. Morpheus enforces the role permission; on top of that every route refuses anyone who
  * is not an operator of this cluster (see Tenancy), so tier 3 and customers get nothing whatever their role grants.
+ * A route carries no verb, so those that change something check it themselves: see postOnly.
  */
 @Slf4j
 class HealthController implements PluginController {
@@ -45,6 +47,7 @@ class HealthController implements PluginController {
         Permission emergency = Permission.build(PERM_EMERGENCY, 'full')
         [
                 Route.build('/hvm-health/status', 'status', read),
+                Route.build('/hvm-health/catalog', 'catalog', read),
                 Route.build('/hvm-health/check', 'check', read),
                 Route.build('/hvm-health/job', 'job', read),
                 Route.build('/hvm-health/raw', 'raw', read),
@@ -52,8 +55,9 @@ class HealthController implements PluginController {
                 Route.build('/hvm-health/time-source', 'timeSource', full),
                 Route.build('/hvm-health/preflight', 'preflight', read),
                 Route.build('/hvm-health/fleet', 'fleet', read),
+                Route.build('/hvm-health/report', 'report', read),
                 Route.build('/hvm-health/vlan-test', 'vlanTest', full),
-                Route.build('/hvm-health/eject', 'eject', emergency),
+                Route.build('/hvm-health/remove-host', 'removeHost', emergency),
                 Route.build('/hvm-health/fence-plan', 'fencePlan', emergency),
                 Route.build('/hvm-health/fence-ack', 'fenceAck', emergency),
         ]
@@ -102,10 +106,30 @@ class HealthController implements PluginController {
         m.user?.username ?: 'unknown'
     }
 
+    /**
+     * A link clicked by a logged-in user is a GET, which carries no CSRF token. So what changes something answers POST only, as the tab sends it.
+     * First thing in those routes. A request Morpheus did not describe is refused too.
+     */
+    private static void postOnly(ViewModel<Map> m) {
+        if (m.request?.method != 'POST') {
+            throw new SecurityException('This action must be a POST from the Cluster Health tab.')
+        }
+    }
+
+    /**
+     * A refusal says nothing about the cluster: a missing id gets the same answer as someone else's, and it goes to the log, because an audit entry
+     * lands in the caller's tenant and would hand a customer the cluster's name.
+     */
     private HealthContext operatorCtx(ViewModel<Map> m) {
-        HealthContext ctx = new HealthContext(morpheus, clusterId(m))
-        if (!Tenancy.isOperator(m.user, ctx.cluster, Tenancy.operatorTenantIds(settings()), Tenancy.loader(morpheus))) {
-            Audit.warn(morpheus, m.user, ctx.cluster, 'refused: tenant is not an operator of this cluster', [tenant: m.user?.account?.name])
+        Long id = clusterId(m)
+        HealthContext ctx = null
+        try {
+            ctx = new HealthContext(morpheus, id)
+        } catch (IllegalArgumentException ignored) {
+            // no such cluster: refused below
+        }
+        if (!ctx || !Tenancy.isOperator(m.user, ctx.cluster, Tenancy.operatorTenantIds(settings()), Tenancy.loader(morpheus))) {
+            log.warn("cluster health refused ${user(m)} of tenant ${m.user?.account?.id} on cluster ${id}${ctx ? '' : ', which does not exist'}")
             throw new SecurityException('Cluster health is available only to the tenants that run this cluster.')
         }
         ctx
@@ -132,12 +156,23 @@ class HealthController implements PluginController {
             } catch (IllegalArgumentException e) {
                 standardsError = e.message
             }
-            ok([cluster: ctx.cluster.name, layout: ctx.layout().label, last: HealthMonitor.LAST[ctx.cluster.id], standards: standards, standardsError: standardsError,
-                isMaster: Tenancy.isMaster(m.user?.account, Tenancy.loader(morpheus)),
+            Map last = HealthMonitor.LAST[ctx.cluster.id]
+            ok([cluster: ctx.cluster.name, layout: ctx.layout().label, last: last, standards: standards, standardsError: standardsError,
+                allClustersUrl: Tenancy.isMaster(m.user?.account, Tenancy.loader(morpheus)) ? HealthAnalyticsProvider.PAGE_URL : null,
+                known: last ? null : FindingHistory.lastKnown(morpheus, ctx.cluster.id), historyError: FindingHistory.ERRORS[ctx.cluster.id],
                 canFix: canFix(m.user), canEmergency: canEmergency(m.user),
                 monitorMinutes: HealthMonitor.quickMinutes(s), fullHours: HealthMonitor.fullHours(s),
                 autoFixSafe: s.autoFixSafe in [true, 'true', 'on'], autoFixMaintenance: s.autoFixMaintenance in [true, 'true', 'on'],
+                autoFixNamed: HealthMonitor.autoFixNamed(s, ctx.cluster.id, ctx.cluster.name),
                 jobs: Jobs.forCluster(ctx.cluster.id).findAll { it.state == 'running' }.collect { it.toMap() }])
+        }
+    }
+
+    /** What each check id means, for the tab's popups and Help. It holds no cluster data, and has the same gate as status all the same. */
+    def catalog(ViewModel<Map> m) {
+        guarded {
+            operatorCtx(m)
+            ok(CheckCatalog.forTab())
         }
     }
 
@@ -168,8 +203,12 @@ class HealthController implements PluginController {
     /** The time sources this cluster is verified against; changes nothing on the hosts. Empty clears them. */
     def timeSource(ViewModel<Map> m) {
         guarded {
+            postOnly(m)
             HealthContext ctx = operatorCtx(m)
             List<String> servers = ((p(m).servers ?: '') as String).tokenize(', ;\n\t').unique()
+            if (Jobs.busy(ctx.cluster.id)) {
+                throw new IllegalStateException('Another cluster health operation is running on this cluster, so nothing was saved. Try again when it ends.')
+            }
             ctx.saveTimeSources(servers)
             Audit.info(morpheus, m.user, ctx.cluster, 'cluster time sources set', [servers: servers.join(',') ?: 'none'])
             Map s = settings()
@@ -186,9 +225,7 @@ class HealthController implements PluginController {
             HealthContext ctx = operatorCtx(m)
             Map s = settings()
             String host = p(m).host as String
-            Map plan = Preflight.hostDown(ctx.input(ctx.probe('quick'), s.siteStandards as String), host)
-            plan.ejectEnabled = s.enableEject in [true, 'true', 'on']
-            ok(plan)
+            ok(Preflight.hostDown(ctx.input(ctx.probe('quick', HealthContext.INTERACTIVE_PROBE_TIMEOUT_SEC), s.siteStandards as String), host))
         }
     }
 
@@ -202,33 +239,50 @@ class HealthController implements PluginController {
         }
     }
 
+    /**
+     * The read-only report on one cluster, for whoever runs it. It can leave the tenant that fetched it, so nothing about any tenant
+     * goes in (see HealthReport). If the names to withhold cannot be read this fails, rather than risk printing one.
+     */
+    def report(ViewModel<Map> m) {
+        guarded {
+            HealthContext ctx = operatorCtx(m)
+            Long id = ctx.cluster.id
+            String historyError = FindingHistory.ERRORS[id]
+            Map doc = null
+            try {
+                doc = FindingHistory.read(morpheus, id)
+            } catch (Exception e) {
+                historyError = e.message ?: e.class.simpleName
+            }
+            List<String> names = ctx.morpheusVms(ctx.hosts).collectMany { [it.name, it.label, it.tenant] } + ctx.networkNames() + [ctx.cluster.owner?.name]
+            Map r = HealthReport.build([id: id, name: ctx.cluster.name, layout: ctx.layout().label], HealthMonitor.LAST[id], doc, historyError, names.findAll() as List<String>)
+            Audit.info(morpheus, m.user, ctx.cluster, 'report generated')
+            ok(r)
+        }
+    }
+
     def vlanTest(ViewModel<Map> m) {
         guarded {
+            postOnly(m)
             HealthContext ctx = operatorCtx(m)
             String host = p(m).host as String
             if (!ctx.hosts.any { it.name == host }) {
                 throw new IllegalArgumentException("${host} is not in cluster ${ctx.cluster.name}")
             }
-            List<Map> extra = []
-            if (p(m).vlan && p(m).gateway) {
-                extra << [vlan: p(m).vlan, gateway: p(m).gateway]
-            }
             Map s = settings()
             User who = m.user
             ok(Jobs.start("VLAN test: ${host}".toString(), ctx.cluster.id, user(m)) { List<String> progress ->
-                HostOps.vlanTest(morpheus, ctx, host, extra, who, progress, s)
+                HostOps.vlanTest(morpheus, ctx, host, who, progress, s)
             }.toMap())
         }
     }
 
-    /** Off until enabled in the settings, and confirmed by typing the host's name. */
-    def eject(ViewModel<Map> m) {
+    /** Confirmed by typing the host's name. The checks run again on fresh state before Morpheus is asked. */
+    def removeHost(ViewModel<Map> m) {
         guarded {
+            postOnly(m)
             HealthContext ctx = operatorCtx(m)
             Map s = settings()
-            if (!(s.enableEject in [true, 'true', 'on'])) {
-                throw new IllegalStateException('Safe eject is switched off in the plugin settings.')
-            }
             String host = p(m).host as String
             if (!host || !ctx.hosts.any { it.name == host }) {
                 throw new IllegalArgumentException("${host} is not in cluster ${ctx.cluster.name}")
@@ -237,8 +291,8 @@ class HealthController implements PluginController {
                 throw new IllegalArgumentException("Type the host name, ${host}, to confirm")
             }
             User who = m.user
-            ok(Jobs.start("eject: ${host}".toString(), ctx.cluster.id, user(m)) { List<String> progress ->
-                HostOps.eject(morpheus, ctx, host, who, progress, s)
+            ok(Jobs.start("remove: ${host}".toString(), ctx.cluster.id, user(m)) { List<String> progress ->
+                HostOps.removeHost(morpheus, ctx, host, who, progress, s)
             }.toMap())
         }
     }
@@ -252,6 +306,7 @@ class HealthController implements PluginController {
 
     def fix(ViewModel<Map> m) {
         guarded {
+            postOnly(m)
             HealthContext ctx = operatorCtx(m)
             String host = p(m).host as String
             String key = p(m).key as String
@@ -270,7 +325,7 @@ class HealthController implements PluginController {
     }
 
     private Fixes.FencePlan plan(HealthContext ctx, Integer node, Map s) {
-        Map<String, HostFacts> facts = ctx.probe('quick')
+        Map<String, HostFacts> facts = ctx.probe('quick', HealthContext.INTERACTIVE_PROBE_TIMEOUT_SEC)
         Fixes.fencePlan(ctx.input(facts, s.siteStandards as String), node)
     }
 
@@ -297,6 +352,7 @@ class HealthController implements PluginController {
      */
     def fenceAck(ViewModel<Map> m) {
         guarded {
+            postOnly(m)
             HealthContext ctx = operatorCtx(m)
             Integer node = nodeId(m)
             String typed = p(m).confirm as String

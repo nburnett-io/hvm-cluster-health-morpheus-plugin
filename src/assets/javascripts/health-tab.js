@@ -58,11 +58,138 @@
   function put(box, node) { box.innerHTML = ''; box.classList.remove('hh-muted'); if (node) box.appendChild(node); }
   function ago(ms) { var m = Math.round((Date.now() - ms) / 60000); return m < 1 ? 'just now' : (m < 120 ? m + ' min ago' : Math.round(m / 60) + ' h ago'); }
   var TIER = { SAFE: 'no effect on the cluster', MAINTENANCE: 'needs maintenance mode', EMERGENCY: 'emergency' };
+  ns.ui = { client: client, el: el, btn: btn, table: table, put: put, ago: ago };   // for health-pages.js
+
+  // reference: start. PluginSpec holds this block to hh- classes, and to text only.
+  /**
+   * What each check id means: a popup for one, and Help for all of them. A native modal dialog, so Esc, focus and its return, and staying above Morpheus's
+   * page come with it. It lives under root for the tab's styles. The catalog loads once, on first use, and a failed load is tried again on the next click.
+   */
+  function reference(root, call) {
+    var dialog, title, tools, box, loaded, shown = 0, pressed = null;
+    function catalog() {
+      if (!loaded) loaded = call('catalog').catch(function (e) { loaded = null; throw e; });
+      return loaded;
+    }
+    function clear(n) { while (n.firstChild) n.removeChild(n.firstChild); }
+    /** The tab sits on the page's background whichever theme is on, and a dialog needs one of its own. Only an opaque colour will do: rgb(), never rgba(). */
+    function surface() {
+      for (var n = root; n; n = n.parentElement) {
+        var c = getComputedStyle(n).backgroundColor;
+        if (/^rgb\(/.test(c)) return c;
+      }
+      var text = (getComputedStyle(root).color.match(/\d+/g) || [0, 0, 0]).slice(0, 3).map(Number);
+      return text[0] + text[1] + text[2] > 382 ? '#1f2328' : '#ffffff';
+    }
+    function build() {
+      title = el('h3', { 'class': 'hh-dialog-title', id: 'hh-dialog-title' });
+      tools = el('div', { 'class': 'hh-dialog-tools' });
+      box = el('div', { 'class': 'hh-dialog-body' });
+      dialog = el('dialog', { 'class': 'hh-dialog', 'aria-labelledby': 'hh-dialog-title' }, [
+        el('div', { 'class': 'hh-dialog-in' }, [el('div', { 'class': 'hh-dialog-head' }, [title, btn('Close', function () { dialog.close(); })]), tools, box])]);
+      // a click on the dialog itself is on its backdrop, as its content fills it. Selecting text and letting go outside is not a click outside.
+      dialog.addEventListener('mousedown', function (ev) { pressed = ev.target; });
+      dialog.addEventListener('click', function (ev) { if (ev.target === dialog && pressed === dialog) dialog.close(); });
+      root.appendChild(dialog);
+    }
+    /** Returns a number that is stale once anything else has opened, so a slow load cannot draw over it. */
+    function open(heading, wide) {
+      if (!dialog) build();
+      title.textContent = heading;
+      dialog.classList.toggle('hh-dialog-wide', wide);
+      dialog.style.backgroundColor = surface();
+      clear(tools);
+      clear(box);
+      box.appendChild(el('div', { 'class': 'hh-muted', text: 'Loading…' }));
+      if (!dialog.open) dialog.showModal();
+      return ++shown;
+    }
+    function failed(mine, e) {
+      if (mine !== shown) return;
+      clear(box);
+      box.appendChild(el('div', { 'class': 'hh-err', text: 'The reference could not be loaded: ' + e.message }));
+    }
+    function field(label, text) {
+      return el('div', { 'class': 'hh-ref-field' }, [el('span', { 'class': 'hh-ref-label', text: label + ': ' }), text]);
+    }
+    function fields(c) { return [field('What it looks at', c.what), field('Why it matters', c.why), field('What to do', c.action)]; }
+    function showId(id) {
+      var mine = open(id, false);
+      catalog().then(function (cat) {
+        if (mine !== shown) return;
+        var c = cat.checks.filter(function (k) { return k.id === id; })[0];
+        clear(box);
+        if (!c) { box.appendChild(el('div', { text: 'This version has no reference entry for ' + id + '.' })); return; }
+        title.textContent = id + ': ' + c.name;
+        fields(c).forEach(function (f) { box.appendChild(f); });
+      }, function (e) { failed(mine, e); });
+    }
+    function legend(cat) {
+      return el('div', { 'class': 'hh-ref-legend' }, cat.statuses.map(function (s) {
+        return el('div', { 'class': 'hh-ref-note' }, [el('span', { 'class': 'hh-ref-status hh-st-' + s.status, text: s.status.replace('_', ' ') }), ': ' + s.meaning]);
+      }).concat([el('div', { 'class': 'hh-ref-note', text: 'An id starts with its area: ' + cat.areas.map(function (a) { return a.prefix + ' = ' + a.area; }).join(', ') + '.' })],
+        cat.notes.map(function (n) { return el('div', { 'class': 'hh-ref-note', text: n }); })));
+    }
+    function showAll() {
+      var mine = open('Findings reference', true);
+      catalog().then(function (cat) {
+        if (mine !== shown) return;
+        var rows = cat.checks.map(function (c) {
+          return { c: c, text: [c.id, c.area, c.name, c.what, c.why, c.action].join(' ').toLowerCase(),
+            node: el('div', { 'class': 'hh-ref-entry' }, [el('div', { 'class': 'hh-ref-name', text: c.id + ': ' + c.name })].concat(fields(c))) };
+        });
+        var groups = cat.areas.map(function (a) {
+          var own = rows.filter(function (r) { return r.c.area === a.area; });
+          return { own: own, node: el('div', {}, [el('div', { 'class': 'hh-ref-area', text: a.area + ' (' + a.prefix + ')' })].concat(own.map(function (r) { return r.node; }))) };
+        });
+        var input = el('input', { type: 'text', 'class': 'hh-search', placeholder: 'Search by id or words', 'aria-label': 'Search the findings reference' });
+        var tally = el('div', { 'class': 'hh-ref-tally', 'aria-live': 'polite' });
+        var none = el('div', { 'class': 'hh-hidden hh-muted', text: 'Nothing matches. Try fewer words.' });
+        function filter() {
+          var words = input.value.toLowerCase().split(/\s+/).filter(Boolean), hits = 0;
+          groups.forEach(function (g) {
+            var any = false;
+            g.own.forEach(function (r) {
+              var hit = words.every(function (w) { return r.text.indexOf(w) >= 0; });
+              r.node.classList.toggle('hh-hidden', !hit);
+              if (hit) { any = true; hits++; }
+            });
+            g.node.classList.toggle('hh-hidden', !any);
+          });
+          none.classList.toggle('hh-hidden', hits > 0);
+          tally.textContent = words.length ? hits + ' of ' + rows.length + ' checks match' : rows.length + ' checks';
+        }
+        input.addEventListener('input', filter);
+        filter();
+        clear(box);
+        tools.appendChild(input);
+        tools.appendChild(tally);
+        box.appendChild(legend(cat));
+        box.appendChild(none);
+        groups.forEach(function (g) { box.appendChild(g.node); });
+        input.focus();
+      }, function (e) { failed(mine, e); });
+    }
+    function idLink(id) {
+      var b = el('button', { type: 'button', 'class': 'hh-id', 'aria-haspopup': 'dialog', title: 'What is ' + id + '?', text: id });
+      b.addEventListener('click', function () { showId(id); });
+      return b;
+    }
+    /** "CLU-01, MOR-01", each one a link, as nodes to go after a label. */
+    function idLinks(ids) {
+      var out = [];
+      ids.forEach(function (id, i) { if (i) out.push(', '); out.push(idLink(id)); });
+      return out;
+    }
+    return { showAll: showAll, idLink: idLink, idLinks: idLinks };
+  }
+  // reference: end
 
   function init(root) {
     if (!root || root.getAttribute('data-health-init')) return;
     root.setAttribute('data-health-init', '1');
     var call = client(root.getAttribute('data-cluster-id'));
+    var ref = root.hhReference || (root.hhReference = reference(root, call));   // one dialog, if Morpheus starts the tab again on this element
     var state = { status: null, view: null, showPass: false, watching: {} };
     function body(id) { return root.querySelector('[data-section="' + id + '"] .ph-body'); }
     function canFix() { return !state.status || state.status.canFix !== false; }
@@ -92,20 +219,32 @@
     }
     function refreshAfter(j) { if (j.result && j.result.results) showView(j.result); else load(); }
 
+    /** The way to the all-clusters page, for the master tenant, and a word if history is not being kept. */
+    function summaryNotes(v) {
+      var s = state.status, err = (v && v.historyError) || (s && s.historyError);
+      return el('div', {}, [
+        err ? el('div', { 'class': 'hh-err', text: 'History is not being saved: ' + err }) : null,
+        s && s.allClustersUrl ? el('a', { href: s.allClustersUrl, text: 'All clusters' }) : null]);
+    }
+
     function renderSummary() {
       var box = body('summary'), s = state.status, v = state.view;
       if (!v) {
-        put(box, el('div', { 'class': 'hh-muted', text: (s ? (s.layout + '. ') : '') + 'Not checked since the plugin loaded. Run a full check, or wait for the automatic one.' }));
+        var known = s && s.known;
+        put(box, el('div', {}, [el('div', { 'class': 'hh-muted', text: (s ? (s.layout + '. ') : '') + 'Not checked since the plugin loaded. Run a full check, or wait for the automatic one.' + (known ? ' Last known: ' + known.overall + ', ' + new Date(known.at).toLocaleString() + '.' : '') }), summaryNotes(null)]));
         return;
       }
       var auto = s ? (s.monitorMinutes > 0 ? 'Automatic check every ' + s.monitorMinutes + ' min.' : 'Automatic checks are off.') : '';
-      var fixes = s ? ('Automatic fixes: safe ' + (s.autoFixSafe ? 'on' : 'off') + ', in maintenance ' + (s.autoFixMaintenance ? 'on' : 'off') + '.') : '';
+      var fixes = s ? ('Automatic fixes: safe ' + (s.autoFixSafe ? 'on' : 'off') + ', in maintenance ' + (s.autoFixMaintenance ? 'on' : 'off') + ((s.autoFixSafe || s.autoFixMaintenance) ? (s.autoFixNamed ? ', and this cluster is named for them.' : ', but this cluster is not named for them, so none run here.') : '.')) : '';
       put(box, el('div', {}, [
         el('div', { 'class': 'hh-banner hh-ov-' + v.overall, text: v.overall + ': ' + v.counts.fail + ' failing, ' + v.counts.warn + ' warnings, ' + v.counts.pass + ' passing' }),
         el('div', { 'class': 'hh-muted', text: v.layout + '. Last ' + v.mode + ' check ' + ago(v.at) + '. ' + auto + ' ' + fixes }),
         (v.readiness && v.readiness.length) ? table(['Ready for', 'Status', 'Findings'], v.readiness.map(function (a) {
-          return [a.area, el('span', { 'class': 'st-' + a.status, text: a.status === 'PASS' ? 'OK' : a.status }), (a.ids || []).join(', ')];
-        })) : null
+          var ids = a.ids || [], unread = a.notChecked || [];
+          var findings = el('span', {}, ref.idLinks(ids).concat(ids.length && unread.length ? ['. '] : [], unread.length ? ['Not checked: '].concat(ref.idLinks(unread)) : []));
+          return [a.area, el('span', { 'class': 'st-' + a.status, text: a.status === 'PASS' ? 'OK' : a.status.replace('_', ' ') }), findings];
+        })) : null,
+        summaryNotes(v)
       ]));
     }
 
@@ -128,13 +267,13 @@
       filter.innerHTML = '';
       filter.appendChild(btn(state.showPass ? 'Show problems only' : 'Show everything (' + v.results.length + ')', function () { state.showPass = !state.showPass; renderFindings(); }));
       if (!rows.length) { put(box, el('div', { 'class': 'st-PASS', text: 'Nothing failing or warning.' })); return; }
-      put(box, table(['Status', 'Severity', 'Check', 'Host', 'Observed', 'Expected', 'Source', ''], rows.map(function (r) {
-        var check = el('div', {}, [el('strong', { text: r.id }), ' ' + r.title]);
+      put(box, table(['Status', 'Severity', 'Check', 'Host', 'Observed', 'Expected', 'Source', 'First seen', ''], rows.map(function (r) {
+        var check = el('div', {}, [ref.idLink(r.id), ' ' + r.title]);
         if (r.hint) check.appendChild(el('div', { 'class': 'hh-hint', text: r.hint }));
         if (r.impact) check.appendChild(el('div', { 'class': 'hh-impact', text: 'Affects: ' + r.impact }));
         var f = fixButton(r);
         var act = f ? el('div', {}, [f, el('span', { 'class': 'hh-tier', text: TIER[r.tier] || '' })]) : '';
-        return [el('span', { 'class': 'hh-nw st-' + r.status, text: r.status }), el('span', { 'class': 'hh-nw', text: r.severity }), check, el('span', { 'class': 'hh-nw', text: r.host || 'cluster' }), r.observed, r.expected, el('span', { 'class': 'hh-nw', text: r.source }), act];
+        return [el('span', { 'class': 'hh-nw st-' + r.status, text: r.status.replace('_', ' ') }), el('span', { 'class': 'hh-nw', text: r.severity }), check, el('span', { 'class': 'hh-nw', text: r.host || 'cluster' }), r.observed, r.expected, el('span', { 'class': 'hh-nw', text: r.source }), r.firstSeen ? el('span', { 'class': 'hh-nw', text: new Date(r.firstSeen).toLocaleString() }) : '', act];
       })));
     }
 
@@ -146,7 +285,7 @@
         ? 'Cluster time source: ' + t.defined.join(', ') + ' (' + (t.definedBy === 'cluster' ? 'defined here' : (t.definedBy === 'site' ? 'from the site standards' : 'from the layout settings')) + ').'
         : 'No time source is defined for this cluster, so hosts are only checked against whatever they follow.';
       var drift = t.driftMs != null ? 'Hosts are ' + t.driftMs + ' ms apart, measured against ' + t.driftServers + ' shared time server(s).' : 'The hosts share no time server, so drift between them can only be compared roughly.';
-      var wrap = el('div', {}, [el('div', { text: head }), el('div', { 'class': 'hh-muted', text: drift })]);
+      var wrap = el('div', {}, [el('div', { text: head }), el('div', { 'class': 'hh-muted', text: drift + (t.driftNote ? ' ' + t.driftNote : '') })]);
       if (canFix()) {
         var input = el('input', { type: 'text', 'class': 'hh-time-input', placeholder: 'ntp1.example.net, ntp2.example.net' });
         input.value = t.definedBy === 'cluster' ? t.defined.join(', ') : '';
@@ -156,9 +295,9 @@
         });
         wrap.appendChild(el('div', { 'class': 'hh-row' }, [input, save, el('span', { 'class': 'hh-muted', text: 'Hosts are verified against this. Nothing changes on a host until you run its fix, in maintenance mode.' })]));
       }
-      wrap.appendChild(table(['Host', 'Time source', 'Following now', 'Configured', 'Synced', 'Offset from source', 'Drift from other hosts', 'Stratum'], t.hosts.map(function (h) {
+      wrap.appendChild(table(['Host', 'Time source', 'Daemon', 'Following now', 'Configured', 'Synced', 'Offset from source', 'Drift from other hosts', 'Stratum'], t.hosts.map(function (h) {
         return [el('span', { 'class': 'hh-nw', text: h.name }), el('span', { 'class': h.state === 'cluster source' ? 'hh-nw st-PASS' : (h.state === 'none configured' ? 'hh-nw st-FAIL' : 'hh-nw st-WARN'), text: h.state }),
-          h.following || 'nothing', (h.configured || []).join(', ') || 'none', h.synced === true ? 'yes' : (h.synced === false ? el('span', { 'class': 'st-FAIL', text: 'NO' }) : '?'),
+          h.daemon || 'none', h.following || 'nothing', (h.configured || []).join(', ') || 'none', h.synced === true ? 'yes' : (h.synced === false ? el('span', { 'class': 'st-FAIL', text: 'NO' }) : '?'),
           h.offsetMs != null ? h.offsetMs + ' ms' : '', h.driftMs != null ? (h.driftMs > 0 ? '+' : '') + h.driftMs + ' ms' : '', h.stratum == null ? '' : h.stratum];
       })));
       put(box, wrap);
@@ -175,36 +314,20 @@
       if (p.moves && p.moves.length) d.appendChild(table(['VM', 'Tenant', 'Memory', 'Can move to'], p.moves.map(function (m) {
         return [m.vm, m.tenant || '', m.memoryGiB + ' GiB', m.targets.length ? m.targets.join(', ') : el('span', { 'class': 'st-FAIL', text: 'nowhere' })];
       })));
-      var e = p.eject || {};
-      d.appendChild(el('h4', { text: 'Taking it out of the cluster' }));
-      d.appendChild(el('div', { 'class': 'hh-hint', text: 'Maintenance mode empties a host but leaves it a cluster member. If it then powers off or is rebuilt, every GFS2 datastore on the other hosts freezes until it is acknowledged as fenced. Eject it first.' }));
+      var e = p.removal || {};
+      d.appendChild(el('h4', { text: 'Removing it from the cluster' }));
+      d.appendChild(el('div', { 'class': 'hh-hint', text: 'Maintenance mode empties a host but leaves it a cluster member. If it then powers off, every GFS2 datastore on the other hosts stalls for about 2 minutes, and freezes if it is not acknowledged. Morpheus\'s remove leaves cleanly, but carries on if GFS2 is in use, so this checks first and then asks Morpheus. Morpheus\'s own Remove button skips these checks.' }));
       d.appendChild(el('ol', {}, (e.steps || []).map(function (s) { return el('li', { text: s }); })));
       if (e.warning) d.appendChild(el('div', { 'class': 'hh-hint', text: e.warning }));
-      (e.blockers || []).forEach(function (b) { d.appendChild(el('div', { 'class': 'hh-err', text: 'Before ejecting: ' + b })); });
-      if (e.ready && p.ejectEnabled && canEmergency()) {
+      (e.blockers || []).forEach(function (b) { d.appendChild(el('div', { 'class': 'hh-err', text: 'Before removing: ' + b })); });
+      if (e.ready && canEmergency()) {
         var typed = el('input', { type: 'text', placeholder: 'Type ' + p.host });
-        d.appendChild(el('div', { 'class': 'hh-row' }, [typed, btn('Eject from cluster', function (ev) {
+        d.appendChild(el('div', { 'class': 'hh-row' }, [typed, btn('Remove safely', function (ev) {
           ev.target.disabled = true;
-          call('eject', { host: p.host, confirm: typed.value }, true).then(function (j) { follow(j, refreshAfter); }, function (x) { window.alert(x.message); ev.target.disabled = false; });
+          call('remove-host', { host: p.host, confirm: typed.value }, true).then(function (j) { follow(j, refreshAfter); }, function (x) { window.alert(x.message); ev.target.disabled = false; });
         }, 'btn-danger')]));
-      } else if (e.ready && !p.ejectEnabled) {
-        d.appendChild(el('div', { 'class': 'hh-muted', text: 'Safe eject is ready to run, but is switched off in the plugin settings.' }));
       }
       box.appendChild(d);
-    }
-
-    /** Master tenant only: every cluster, worst first. */
-    function loadFleet() {
-      var sec = root.querySelector('[data-section="fleet"]');
-      if (!state.status || !state.status.isMaster) return;
-      call('fleet').then(function (rows) {
-        sec.classList.remove('hh-hidden');
-        put(sec.querySelector('.ph-body'), table(['Cluster', 'Owner', 'Health', 'Layout', 'Failing', 'Warnings', 'Not ready for', 'Last check'], rows.map(function (c) {
-          var bad = (c.readiness || []).filter(function (a) { return a.status === 'FAIL'; }).map(function (a) { return a.area; });
-          return [el('a', { href: '/infrastructure/clusters/' + c.id, text: c.name }), c.owner || '', el('span', { 'class': 'hh-nw hh-ov-' + c.overall, text: c.frozen ? 'FROZEN' : c.overall }), c.layout || '',
-            c.counts ? c.counts.fail : '', c.counts ? c.counts.warn : '', bad.join(', '), c.at ? ago(c.at) : ''];
-        })));
-      }, function () { /* not offered to this user */ });
     }
 
     function renderHosts() {
@@ -287,7 +410,6 @@
         state.status = s;
         (s.jobs || []).forEach(function (j) { follow(j, refreshAfter); });
         showView(s.last || null);
-        loadFleet();
       }, function (e) { put(body('summary'), el('div', { 'class': 'hh-err', text: e.message })); });
     }
 
@@ -295,6 +417,8 @@
       ev.target.disabled = true;
       call('check', {}, false).then(function (j) { follow(j, function (d) { ev.target.disabled = false; refreshAfter(d); }); }, function (e) { ev.target.disabled = false; window.alert(e.message); });
     });
+    root.querySelector('[data-act="help"]').addEventListener('click', function () { ref.showAll(); });
+    root.querySelector('[data-act="report"]').addEventListener('click', function () { ns.pages.report(body('report'), call); });
     load();
   }
 

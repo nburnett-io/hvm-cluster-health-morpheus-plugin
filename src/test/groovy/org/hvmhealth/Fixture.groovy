@@ -37,6 +37,14 @@ class Fixture {
         }, LAYOUT_20, site)
     }
 
+    /** Three healthy 1.3 hosts as Morpheus builds them, on systemd-timesyncd with no ipmitool; {@code edit} gets the text and the host's name. */
+    static HealthChecker.Input timesyncd(String site = null, Closure<String> edit = { String t, String h -> t }) {
+        input((1..3).collect { int n ->
+            String name = "hvm-node0${n}".toString()
+            host(name, facts('probe-timesyncd', name) { String t -> edit.call(n == 1 ? t : t.replace(' 1   vm-one   running', ''), name) })
+        }, LAYOUT_13, site)
+    }
+
     /**
      * The failure this plugin exists for: node 1 taken out of Morpheus and rebuilt without leaving the cluster, so corosync
      * and DLM still count it, while the HVM agents on the two survivors acknowledge each other and never it.

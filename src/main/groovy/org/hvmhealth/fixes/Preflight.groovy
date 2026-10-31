@@ -6,11 +6,11 @@ import org.hvmhealth.checks.HealthChecker.Input
 import org.hvmhealth.model.HostFacts
 
 /**
- * "Can I take this host down?", and how to take it out of the cluster without freezing it.
+ * "Can I take this host down?", and whether Morpheus can safely remove it from the cluster.
  *
  * Maintenance mode empties a host but leaves it a cluster member. If it then goes away, DLM treats it as failed and stops
- * every lockspace until it is fenced. A node that first leaves cleanly is simply gone: it unmounts GFS2, which takes it out of
- * the lockspaces, then stops dlm, then corosync, which announces its leaving. Only then is it safe to power off or rebuild.
+ * every lockspace until it is fenced. Morpheus's own remove leaves cleanly, in the right order, but carries on when GFS2 is in
+ * use. So the plugin checks first and then calls that remove, rather than doing the cluster work itself.
  */
 class Preflight {
     /** Verdict plus what stands in the way, what to expect, and which VMs cannot move. */
@@ -47,111 +47,88 @@ class Preflight {
         // where each VM on this host can go
         List<Map> vms = in_.morpheusVms.findAll { it.host == hostName && it.power == 'on' }
         boolean passthrough = !(in_.clusterConfig?.cpuModel) || in_.clusterConfig.cpuModel in ['host-passthrough', 'host-model']
-        List<Map> moves = vms.collect { Map v ->
+        // largest first, and what one VM takes is not there for the next: they all have to fit at once
+        Map<String, Long> free = others.collectEntries { [(it.name): (it.facts?.memAvailKb ?: 0L) * 1024L] }
+        List<Map> moves = vms.sort(false) { -((it.memory ?: 0L) as Long) }.collect { Map v ->
+            long memory = (v.memory ?: 0L) as Long
             List<String> targets = others.findAll { Host o ->
-                !o.maintenance && o.facts?.complete && o.facts.memAvailKb && o.facts.memAvailKb * 1024L >= ((v.memory ?: 0L) as Long) &&
+                !((v.name as String) in (h.facts?.vmNoMigrate ?: [])) && !o.maintenance && o.facts?.complete && o.facts.memAvailKb && free[o.name] >= memory &&
                         !(passthrough && h.facts?.cpuFlags && o.facts.cpuFlags && o.facts.cpuFlags != h.facts.cpuFlags)
             }*.name as List<String>
-            [vm: v.name, tenant: v.tenant, memoryGiB: ((v.memory ?: 0L) as Long) >> 30, targets: targets]
+            if (targets) {
+                String into = targets.max { free[it] }
+                free[into] -= memory
+            }
+            [vm: v.name, tenant: v.tenant, memoryGiB: memory >> 30, targets: targets]
         }
         List<Map> stuck = moves.findAll { !it.targets }
         if (stuck) {
-            blockers << "Nowhere to live-migrate ${stuck*.vm.join(', ')}: no other host has the memory and a compatible CPU. They would have to be stopped.".toString()
+            blockers << "Nowhere to live-migrate ${stuck*.vm.join(', ')}: with the others moved, no other host has the memory and a compatible CPU, or the VM's CPU settings pin it here. They would have to be stopped.".toString()
         }
         [host: hostName, verdict: blockers ? 'NO' : (cautions ? 'CAUTION' : 'GO'), blockers: blockers, cautions: cautions, votesAfter: votesAfter, quorum: peer?.quorumVotes,
-         maintenance: h.maintenance, member: member, moves: moves, impact: HealthChecker.impactOf(vms), eject: ejectReadiness(in_, hostName)]
+         maintenance: h.maintenance, member: member, moves: moves, impact: HealthChecker.impactOf(vms), removal: removeReadiness(in_, hostName)]
     }
 
-    /** What must be true before ejecting this host from the cluster. Empty blockers means it may start. */
-    static Map ejectReadiness(Input in_, String hostName) {
+    /** What must be true before Morpheus removes this host from the cluster. Empty blockers means it may start. */
+    static Map removeReadiness(Input in_, String hostName) {
         Host h = in_.hosts.find { it.name == hostName }
         List<String> why = new ArrayList<>(Fixes.blockers(HealthChecker.Tier.MAINTENANCE, in_, hostName))
-        Map node = h?.facts?.nodelist?.find { HealthChecker.isNode(it, h) }
-        if (h?.facts?.complete && !node) {
-            why << "${hostName} is not in corosync.conf: it is not a cluster member".toString()
-        }
         h?.facts?.gfsInUse?.findAll { k, v -> v > 0 }?.each { String m, Integer n ->
-            why << "${n} process(es) still have ${m} open on ${hostName}: it could not unmount".toString()
+            why << "${n} process(es) still have ${m} open on ${hostName}: Morpheus would carry on without unmounting it, leaving its lockspace abandoned".toString()
+        }
+        List<String> recorded = in_.morpheusVms.findAll { it.host == hostName }*.name as List<String>
+        if (recorded) {
+            why << "Morpheus still has VM(s) on ${hostName}, running or not: ${recorded.join(', ')}. Move them first".toString()
         }
         List<Host> others = in_.hosts.findAll { it.name != hostName }
-        if (others.size() < 2) {
-            why << 'Ejecting this host would leave one: the cluster could not keep quorum'
+        // Morpheus's agent acknowledges only nodes it has a record of: remove one while the rest are recovering, and a host that restarts then waits forever
+        others.findAll { it.facts?.fenceWaits }.each { why << "${it.name} still has a fence request open: wait until it clears".toString() }
+        // deleted while its GFS2 mount was still starting, a host froze the others for 27 minutes in a way nothing could acknowledge
+        if (h?.facts?.corosyncUpSec != null && h.facts.corosyncUpSec < RECENT_BOOT_SEC) {
+            why << "${hostName} joined the cluster less than ${(RECENT_BOOT_SEC / 60L) as int} minutes ago, and its GFS2 mount may still be starting: wait until it has settled".toString()
         }
-        [ready: !why, blockers: why, nodeId: node?.nodeid, nodeAddr: node?.addr,
-         leaves: others*.name,
+        others.findAll { it.facts?.boot && it.facts?.now && it.facts.now - it.facts.boot < RECENT_BOOT_SEC }.each { why << "${it.name} restarted less than ${(RECENT_BOOT_SEC / 60L) as int} minutes ago: wait until it has settled".toString() }
+        if (others.size() < 2) {
+            why << 'Removing this host would leave one: the cluster could not keep quorum'
+        }
+        [ready: !why, blockers: why, leaves: others*.name,
          warning: others.size() == 2 ? 'Two hosts will remain with both votes needed: either one failing then stops every GFS2 datastore until the other is told it is alone. Finish the move quickly, or add a witness.' : null,
-         steps: EJECT_STEPS]
+         steps: REMOVAL_STEPS]
     }
 
-    static final List<String> EJECT_STEPS = [
-            'Unmount GFS2 on the host, which takes it out of every DLM lockspace. Refused if anything still has files open there.',
-            'Stop and disable dlm, then corosync, on the host, so it announces it is leaving rather than vanishing.',
-            'Remove it from corosync.conf on the remaining hosts, and reload corosync there.',
-            'Check the remaining hosts after each step. Any sign of a fence wait stops the eject.',
-            'Then remove the host in Morpheus, and power it off or rebuild it.',
+    private static final long RECENT_BOOT_SEC = 600L
+    private static final int UNMOUNT_WAIT_SEC = 60
+
+    static final List<String> REMOVAL_STEPS = [
+            'Check that the host is in maintenance mode with nothing on it, that nothing has GFS2 open there, that the rest keep quorum, and that none of them is recovering.',
+            'Unmount GFS2 first, with a time limit. A hung unmount stops here, with the host still known to Morpheus, so its agent can still acknowledge it if it goes down.',
+            'Morpheus removes it: stop dlm then corosync so it announces it is leaving, then update corosync.conf on the remaining hosts.',
+            'Watch the remaining hosts until they count one host fewer, and report any sign of a fence wait.',
+            'It can then be powered off or rebuilt. Adding it back is an ordinary add in Morpheus.',
     ]
 
-    // ------------------------------------------------------------------ the scripts
-
-    /** Step 1, on the leaving host. Exit 3 means something still uses the mount; nothing has changed. */
+    /**
+     * Before Morpheus is asked. Its own unmount has no limit and it carries on regardless: when one hung, its record went but the others kept
+     * expecting the host, and a fence wait followed. Exit 3 means nothing changed. Exit 4 is an unmount refused, so that mount's pool is started again.
+     * Exit 6 is a hung unmount, which only a reboot clears, and its pool stays stopped: starting one would touch the hung mount.
+     */
     static String unmountScript() {
         Fixes.HEADER + '''mounts="$(awk '$3=="gfs2"{print $2}' /proc/mounts)"
 for m in $mounts; do
   if fuser -m "$m" >/dev/null 2>&1; then echo "REFUSED: still in use: $m"; fuser -vm "$m" 2>&1 | head -12; exit 3; fi
 done
 for m in $mounts; do
-  p="$(virsh -q pool-list --all 2>/dev/null | awk '{print $1}' | while read -r n; do virsh pool-dumpxml "$n" 2>/dev/null | grep -q "<path>$m</path>" && echo "$n"; done | head -1)"
-  [ -n "$p" ] && virsh pool-destroy "$p" >/dev/null 2>&1
-  timeout -k 5 60 umount "$m" && echo "unmounted $m" || { echo "FAILED to unmount $m"; exit 4; }
+  p="$(virsh -q pool-list --all 2>/dev/null | awk '{print $1}' | while read -r n; do virsh pool-dumpxml "$n" 2>/dev/null | grep -q "<path>$m</path>" && echo "$n"; done | head -1 || true)"
+  if [ -n "$p" ]; then virsh pool-destroy "$p" >/dev/null 2>&1 || echo "could not stop pool $p"; fi
+  umount "$m" & u=$!
+  for _ in $(seq 1 ''' + UNMOUNT_WAIT_SEC + '''); do kill -0 "$u" 2>/dev/null || break; sleep 1; done
+  if kill -0 "$u" 2>/dev/null; then echo "HUNG: umount of $m has not finished after ''' + UNMOUNT_WAIT_SEC + ''' s"; exit 6; fi
+  wait "$u" || { echo "FAILED to unmount $m"; [ -z "$p" ] || timeout 30 virsh pool-start "$p" >/dev/null 2>&1 || echo "could not start pool $p again"; exit 4; }
+  echo "unmounted $m"
 done
-left="$(dlm_tool ls 2>/dev/null | grep -c '^name')"
+left="$(dlm_tool ls 2>/dev/null | grep -c '^name' || true)"
 [ "$left" = 0 ] || { echo "FAILED: still in $left lockspace(s)"; exit 5; }
 echo 'out of every lockspace'
 '''
     }
-
-    /** Step 2, on the leaving host. */
-    static String leaveScript() {
-        Fixes.HEADER + '''if awk '$3=="gfs2"{f=1} END{exit !f}' /proc/mounts; then echo 'REFUSED: GFS2 is still mounted'; exit 3; fi
-systemctl disable --now dlm 2>&1 | tail -1
-systemctl disable --now corosync 2>&1 | tail -1
-echo "dlm $(systemctl is-active dlm), corosync $(systemctl is-active corosync)"
-'''
-    }
-
-    /** corosync.conf without one node, and with its config_version raised so the reload is taken. */
-    static String withoutNode(List<String> lines, String addr) {
-        List<String> out = []
-        int i = 0
-        boolean removed = false
-        while (i < lines.size()) {
-            String l = lines[i]
-            if (l.trim() == 'node {') {
-                int j = i
-                while (j < lines.size() && lines[j].trim() != '}') { j++ }
-                if (lines[i..j].any { it.trim() == "ring0_addr: ${addr}".toString() }) {
-                    removed = true
-                    i = j + 1
-                    if (i < lines.size() && !lines[i].trim()) { i++ }
-                    continue
-                }
-            }
-            def m = l =~ /^(\s*config_version:\s*)(\d+)\s*$/
-            out << (m.find() ? "${m.group(1)}${(m.group(2) as Integer) + 1}".toString() : l)
-            i++
-        }
-        if (!removed) {
-            throw new IllegalStateException("No node at ${addr} in corosync.conf")
-        }
-        out.join('\n') + '\n'
-    }
-
-    /** Step 3, on each remaining host: replaces the file, keeping the old one, and checks it parses as the node list expected. */
-    static String writeConfScript(String conf) {
-        Fixes.HEADER + "cp -p /etc/corosync/corosync.conf /etc/corosync/corosync.conf.before-eject\n" +
-                "echo '${conf.getBytes('UTF-8').encodeBase64()}' | base64 -d > /etc/corosync/corosync.conf.new\n" +
-                'mv /etc/corosync/corosync.conf.new /etc/corosync/corosync.conf\necho written\n'
-    }
-
-    static final String RELOAD_SCRIPT = Fixes.HEADER + 'corosync-cfgtool -R\nsleep 3\ncorosync-quorumtool -s | grep -E "^(Quorate|Expected votes|Total votes|Quorum):"\n'
 }

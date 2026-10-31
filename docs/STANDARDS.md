@@ -35,15 +35,14 @@ newer than the documentation.
 | `minHosts` | 3 | hpe | |
 | `mpio` | true | hpe | Check multipath paths |
 | `fencingEnabled` | true | upstream | `enable_fencing` in dlm.conf |
-| `quorumFencing` | false | morpheus | As deployed |
 | `consensusRatio` | 1.2 | upstream | corosync.conf(5): consensus at least 1.2 x token |
 | `corosyncToken` | 60000 on 1.3 | morpheus | Not pinned on 2.0 yet |
 | `corosyncConsensus` | 72000 on 1.3 | morpheus | Not pinned on 2.0 yet |
 | `gfs2WarnPct`, `gfs2FailPct` | 80, 90 | plugin | Datastore usage |
 | `heartbeatMaxAgeSec` | 120 | plugin | Files are rewritten about every 20 s |
 | `agentMaxAgeSec` | 300 | plugin | |
-| `maxHostDriftMs` | 50 | plugin | Between hosts, measured against the time servers they share |
-| `maxClockSkewSec` | 5 | plugin | Between hosts sharing no time server: a coarse comparison |
+| `maxHostDriftMs` | 50 | plugin | Between hosts reading the same time server, by address |
+| `maxClockSkewSec` | 5 | plugin | Between hosts sharing no time server: a coarse comparison, which shows neither drift nor agreement in milliseconds |
 | `ntpServers` | not set | plugin | Your time sources. Normally defined per cluster on the tab |
 | `maxNtpOffsetMs` | 100 | plugin | Offset from the time source |
 | `clusterCpuModel` | not set | plugin | The CPU model a cluster must use, HVM's equivalent of EVC |
@@ -54,15 +53,21 @@ newer than the documentation.
 | `hungTasksWarn` | 1 | plugin | Kernel reports in the last hour |
 | `iscsiErrorsWarn` | 1 | plugin | Session errors in 24 h |
 | `osVersion` | by layout | hpe | |
+| `agentMinVersion` | 4.0.1 | plugin | Oldest Morpheus agent seen to acknowledge the right node in a freeze |
+| `certWarnDays`, `certFailDays` | 30, 7 | plugin | Days left on a libvirt certificate in use, or the appliance's |
+| `trunkAllowedVms` | not set | plugin | VMs meant to have a trunk port, by libvirt domain name. Morpheus has no record of this |
 
 ## Time sources
 
 The time source a cluster is verified against comes from, in order: what is defined on its **Time** panel, the `ntpServers` site
 standard, then the NTP servers in the cluster's layout settings (the 2.0 layout has them). Defining one changes nothing on the hosts. A
-host not using it gets a finding, and a fix that needs maintenance mode: a chrony drop-in marked `prefer`, leaving the OS file as shipped.
+host not using it gets a finding, and a fix that needs maintenance mode, with the OS file left as shipped: on chrony a drop-in marked `prefer`; on
+`systemd-timesyncd` a drop-in in `/etc/systemd/timesyncd.conf.d/` and a restart, undone if no listed server answers.
 
 Drift between hosts compares the offsets each host measures to the time servers they share, which reads their clocks against a
 common reference to within milliseconds. Comparing their own timestamps would carry seconds of agent latency, and is only the fallback.
+Hosts on different servers, such as different members of a pool, are not compared to the millisecond, and the finding says so. `systemd-timesyncd` gives one
+sample per host from its last poll, so an offset or a drift over the limit from it is a warning, not a failure.
 
 ## CPU models: the EVC equivalent
 
@@ -88,5 +93,4 @@ version; `disabledChecks` drops checks by id.
 }
 ```
 
-A broken or misspelled setting is reported in the tab and fails the check, rather than being ignored: a standard that silently
-stops applying is worse than none.
+A broken or misspelled setting, or a value of the wrong type, is reported in the tab and by an alarm, PRB-03, rather than ignored: a standard that silently stops applying is worse than none. Checks carry on with the built-in standards until it is fixed, so a freeze is still found, but none of the site's overrides or disabled checks apply meanwhile.

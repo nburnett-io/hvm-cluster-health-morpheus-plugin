@@ -165,7 +165,7 @@ MEM_AVAIL_KB=91083840
  ds-01                  active   yes
 @@packages
 corosync|3.1.9-1
-morpheus-node|3.2.6
+morpheus-node|4.0.1
 @@journals
 JOURNALS=/dev/mapper/3624a9370aaaaaaaaaaaaaaaa00000001|3
 @@bmc

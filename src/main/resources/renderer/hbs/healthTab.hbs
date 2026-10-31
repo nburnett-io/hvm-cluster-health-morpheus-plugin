@@ -14,12 +14,13 @@
   .hvm-health .hh-impact { font-size: 11px; opacity: .85; margin-top: 2px; }
   .hvm-health .hh-time-input { width: 340px; max-width: 100%; padding: 3px 6px; flex: 0 1 auto; }
   .hvm-health .st-PASS { color: #2e7d32; } .hvm-health .st-FAIL { color: #c62828; font-weight: 600; }
-  .hvm-health .st-WARN { color: #b26a00; } .hvm-health .st-NA { opacity: .55; }
+  .hvm-health .st-WARN { color: #b26a00; } .hvm-health .st-NA { opacity: .55; } .hvm-health .st-NOT_CHECKED { color: #546e7a; font-style: italic; }
   .hvm-health .hh-muted { opacity: .7; } .hvm-health .hh-err { color: #c62828; }
   .hvm-health .hh-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
   .hvm-health .hh-row > span, .hvm-health .hh-row > label { flex: 1 1 260px; min-width: 0; white-space: normal; }
   .hvm-health .btn { margin: 0; flex: none; }
   .hvm-health pre { white-space: pre-wrap; font-size: 11px; max-height: 260px; overflow: auto; margin: 6px 0; }
+  .hvm-health pre:empty { display: none; }
   .hvm-health .hh-hint { margin-top: 4px; font-size: 11px; color: #b26a00; white-space: normal; }
   .hvm-health .hh-banner { position: static; display: block; width: auto; height: auto; padding: 10px 12px; border-radius: 3px; font-size: 14px; font-weight: 600; text-align: left; margin: 8px 0; border-left: 5px solid #888; background: none; }
   .hvm-health .hh-ov-CRITICAL { border-color: #c62828; color: #c62828; }
@@ -29,12 +30,42 @@
   .hvm-health .hh-emergency { border: 2px solid #c62828; padding: 10px 12px; margin-bottom: 8px; }
   .hvm-health .hh-emergency input[type=text] { padding: 3px 6px; }
   .hvm-health .hh-tier { font-size: 10px; opacity: .8; display: block; margin-top: 2px; }
+  /* the findings reference: a modal dialog takes the tab's text colour from here, and its background from the page when it opens */
+  .hvm-health .hh-id { display: inline; margin: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; font-weight: 600; white-space: nowrap; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+  .hvm-health .hh-id:hover { text-decoration-style: solid; }
+  .hvm-health .hh-id:focus-visible { outline: 2px solid currentColor; outline-offset: 1px; }
+  .hvm-health .hh-dialog { width: min(42em, 94vw); max-width: 94vw; max-height: 86vh; padding: 0; overflow: hidden; color: inherit; border: 1px solid rgba(128,128,128,.6); border-radius: 4px; font-size: 13px; line-height: 1.45; white-space: normal; overflow-wrap: anywhere; }
+  .hvm-health .hh-dialog-wide { width: min(64em, 94vw); }
+  .hvm-health .hh-dialog::backdrop { background: rgba(0,0,0,.5); }
+  .hvm-health .hh-dialog-in { display: flex; flex-direction: column; max-height: 86vh; min-width: 0; }
+  .hvm-health .hh-dialog-head { display: flex; gap: 12px; align-items: flex-start; padding: 10px 14px; border-bottom: 1px solid rgba(128,128,128,.3); }
+  .hvm-health .hh-dialog-title { flex: 1 1 auto; min-width: 0; margin: 0; font-size: 15px; line-height: 1.3; }
+  .hvm-health .hh-dialog-tools { padding: 8px 14px; border-bottom: 1px solid rgba(128,128,128,.3); }
+  .hvm-health .hh-dialog-tools:empty { display: none; }
+  .hvm-health .hh-dialog-body { flex: 1 1 auto; min-height: 0; padding: 10px 14px 14px; overflow-y: auto; }
+  .hvm-health .hh-search { display: block; width: 100%; box-sizing: border-box; padding: 4px 8px; background: transparent; color: inherit; border: 1px solid rgba(128,128,128,.5); border-radius: 3px; }
+  .hvm-health .hh-ref-tally { margin-top: 4px; font-size: 11px; opacity: .7; }
+  .hvm-health .hh-ref-legend { margin-bottom: 8px; }
+  .hvm-health .hh-ref-note { margin: 4px 0; opacity: .85; }
+  .hvm-health .hh-ref-status { font-weight: 600; white-space: nowrap; }
+  .hvm-health .hh-ref-area { margin: 16px 0 4px; font-size: 14px; font-weight: 600; border-bottom: 1px solid rgba(128,128,128,.3); }
+  .hvm-health .hh-ref-entry { margin: 10px 0; }
+  .hvm-health .hh-ref-name { font-weight: 600; }
+  .hvm-health .hh-ref-field { margin: 3px 0; }
+  .hvm-health .hh-ref-label { font-weight: 600; opacity: .8; }
+  .hvm-health .hh-st-PASS { color: #2e7d32; } .hvm-health .hh-st-FAIL { color: #c62828; }
+  .hvm-health .hh-st-WARN { color: #b26a00; } .hvm-health .hh-st-NA { opacity: .75; } .hvm-health .hh-st-NOT_CHECKED { color: #546e7a; font-style: italic; }
+  /* the tab is narrower than the window, so columns give up their one-line rule well before the window gets small */
+  @media (max-width: 1280px) {
+    .hvm-health th, .hvm-health td > .hh-nw, .hvm-health td.hh-nw { white-space: normal; }
+    .hvm-health td .btn { display: block; width: 100%; max-width: 110px; height: auto; white-space: normal; margin: 0 0 2px; }
+  }
 </style>
 <div class="hvm-health" data-cluster-id="{{id}}"
      data-plugin-react-root data-plugin-key="hvmClusterHealth" data-plugin-entry="clusterTab">
-  <section data-section="fleet" class="hh-hidden"><h3>All clusters</h3><div class="ph-body"></div></section>
   <section data-section="summary"><h3>Cluster health</h3>
     <div class="hh-row"><button type="button" class="btn btn-primary btn-sm" data-act="check">Run full check</button>
+      <button type="button" class="btn btn-default btn-sm" data-act="help" aria-haspopup="dialog">Help</button>
       <span class="hh-muted">Read-only. Compares every host with the others and with this layout's standards.</span></div>
     <div class="ph-body hh-muted">Loading… (if this never changes, the tab script was blocked: check the browser console)</div></section>
   <section data-section="emergency"><div class="ph-body"></div></section>
@@ -44,6 +75,11 @@
   <section data-section="standards"><h3>Standards in force</h3>
     <div class="hh-row"><span class="hh-muted">Override any of these in the plugin's Site standards setting. "hpe" is from HPE documentation, "upstream" from corosync, DLM and GFS2, "morpheus" is how the layout deploys, "plugin" is this plugin's judgement, "site" is yours.</span></div>
     <div class="ph-body"></div></section>
+  <section data-section="report"><h3>Report</h3>
+    <div class="hh-row"><button type="button" class="btn btn-default btn-sm" data-act="report">Open report</button>
+      <span class="hh-muted">Read-only: current findings and their history, to print or export. It names no tenants, VMs or networks.</span></div>
+    <div class="ph-body"></div></section>
   <section data-section="jobs"><h3>Operations</h3><div class="ph-body"></div></section>
 </div>
 <script src="{{asset "/health-tab.js"}}?v=@PLUGIN_VERSION@" nonce="{{nonce}}"></script>
+<script src="{{asset "/health-pages.js"}}?v=@PLUGIN_VERSION@" nonce="{{nonce}}"></script>
