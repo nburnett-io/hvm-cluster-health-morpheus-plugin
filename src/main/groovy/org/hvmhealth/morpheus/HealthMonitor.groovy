@@ -3,6 +3,7 @@ package org.hvmhealth.morpheus
 import com.morpheusdata.core.MorpheusContext
 import com.morpheusdata.core.Plugin
 import com.morpheusdata.core.data.DataQuery
+import com.morpheusdata.model.Account
 import com.morpheusdata.model.ComputeServerGroup
 import com.morpheusdata.model.OperationNotification
 import groovy.util.logging.Slf4j
@@ -36,7 +37,7 @@ class HealthMonitor {
     static final Map<Long, Map> LAST = new ConcurrentHashMap<>()
     private static final Map<Long, List<HealthChecker.Result>> LAST_FULL = new ConcurrentHashMap<>()
     /** Findings only a full check produces (ring and packet tests, journal counts, management controllers). */
-    static final Set<String> FULL_ONLY = ['NET-03', 'NET-09', 'MIG-02', 'GFS-06', 'FEN-01'] as Set
+    static final Set<String> FULL_ONLY = ['NET-03', 'NET-09', 'MIG-02', 'GFS-06', 'FEN-01', 'HW-01', 'HW-02', 'HW-03', 'HW-04', 'HW-05', 'HW-06'] as Set
     private static final Map<String, Long> ATTEMPTS = new ConcurrentHashMap<>()
     private static ScheduledExecutorService sweeper
 
@@ -220,6 +221,28 @@ class HealthMonitor {
         }.unique { it.uniqueId }
     }
 
+    /** The plugin API cannot list tenants, but the master tenant is the first one created. Checked, not assumed. */
+    private static Account masterAccount(MorpheusContext morpheus) {
+        Account a = Tenancy.loader(morpheus).call(1L)
+        a?.masterAccount == true ? a : null
+    }
+
+    /**
+     * Every cluster's last result, for the master tenant's fleet view. Clusters not yet checked since the plugin loaded are
+     * listed as such: an unknown cluster must not read as a healthy one.
+     */
+    static List<Map> fleet(MorpheusContext morpheus) {
+        morpheus.services.cluster.list(new DataQuery()).findAll { monitored(it) }.collect { ComputeServerGroup c ->
+            Map v = LAST[c.id]
+            [id: c.id, name: c.name, owner: c.owner?.name, overall: v?.overall ?: 'NOT CHECKED', layout: v?.layout, at: v?.at, counts: v?.counts, readiness: v?.readiness,
+             frozen: v?.hosts?.any { it.frozen } ?: false]
+        }.sort { a, b -> severityRank(a.overall as String) <=> severityRank(b.overall as String) ?: (a.name as String) <=> (b.name as String) }
+    }
+
+    static int severityRank(String overall) {
+        ['CRITICAL': 0, 'NOT CHECKED': 1, 'DEGRADED': 2, 'WARNING': 3, 'HEALTHY': 4].getOrDefault(overall, 5)
+    }
+
     /**
      * Brings this plugin's alarms for the cluster in line with its findings: only ever its own, by uniqueId prefix, so
      * Morpheus's other alarms are never touched. They sit on the host a finding is about, otherwise on the cluster, in
@@ -228,6 +251,13 @@ class HealthMonitor {
     static void setAlarms(MorpheusContext morpheus, HealthContext ctx, List<HealthChecker.Result> rs) {
         ComputeServerGroup cluster = ctx.cluster
         List<Map> want = alarmsFor(cluster.id, cluster.name, rs)
+        // the master tenant cannot otherwise see the alarms of a cluster another tenant owns, so it gets its own copy
+        Account master = masterAccount(morpheus)
+        if (master && cluster.owner?.id != master.id) {
+            want = want.collect { [*:it, account: cluster.owner] } + want.collect { [*:it, account: master, uniqueId: "${it.uniqueId}-master".toString()] }
+        } else {
+            want = want.collect { [*:it, account: cluster.owner] }
+        }
         Map<String, Long> hostIds = ctx.hosts.collectEntries { [(it.name): it.id] }
         String prefix = alarmPrefix(cluster.id)
         String legacy = "${CATEGORY}-${cluster.id}".toString()   // the single per-cluster alarm of the first builds
@@ -246,7 +276,7 @@ class HealthMonitor {
                 want.findAll { !byId.containsKey(it.uniqueId) }.each { Map a ->
                     Long hostId = hostIds[a.host as String]
                     def r = morpheus.services.operationNotification.createAlarm(new OperationNotification(
-                            account: cluster.owner, category: CATEGORY, eventKey: CATEGORY, uniqueId: a.uniqueId as String, name: a.name as String,
+                            account: a.account as Account, category: CATEGORY, eventKey: CATEGORY, uniqueId: a.uniqueId as String, name: a.name as String,
                             resourceName: (a.host ?: cluster.name) as String, refType: hostId ? 'computeServer' : 'computeServerGroup', refId: hostId ?: cluster.id,
                             status: a.status as String, statusMessage: a.message as String, startDate: new Date(), acknowledged: false, active: true))
                     if (r != null && !r.success) {

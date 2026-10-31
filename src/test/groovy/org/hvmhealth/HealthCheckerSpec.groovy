@@ -505,12 +505,14 @@ class HealthCheckerSpec extends Specification {
         rs.find { it.id == 'HA-02' }.hint.contains('freezes every GFS2 datastore')
     }
 
-    def 'a host out of maintenance with no heartbeat still fails'() {
+    def 'a host out of maintenance with no heartbeat warns, as it can be just back, and a stale one fails'() {
         given:
-        HealthChecker.Input i = Fixture.input([Fixture.host('hvm-node02', Fixture.facts('probe-healthy', 'hvm-node02') { it.replace('HB=hvm-node02|1793385840000\n', '') })], Fixture.LAYOUT_20)
+        HealthChecker.Input absent = Fixture.input([Fixture.host('hvm-node02', Fixture.facts('probe-healthy', 'hvm-node02') { it.replace('HB=hvm-node02|1793385840000\n', '') })], Fixture.LAYOUT_20)
+        HealthChecker.Input stale = Fixture.input([Fixture.host('hvm-node02', Fixture.facts('probe-healthy', 'hvm-node02') { it.replace('HB=hvm-node02|1793385840000', 'HB=hvm-node02|1793385000000') })], Fixture.LAYOUT_20)
 
         expect:
-        check(i).find { it.id == 'HB-01' && it.host == 'hvm-node02' }.status == Status.FAIL
+        check(absent).find { it.id == 'HB-01' && it.host == 'hvm-node02' }.status == Status.WARN
+        check(stale).find { it.id == 'HB-01' && it.host == 'hvm-node02' }.status == Status.FAIL
     }
 
     def 'the HA flag on the cluster record is reported'() {

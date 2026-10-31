@@ -2,6 +2,7 @@ package org.hvmhealth.morpheus
 
 import com.morpheusdata.core.MorpheusContext
 import com.morpheusdata.core.data.DataQuery
+import com.morpheusdata.model.Account
 import com.morpheusdata.model.ComputeServer
 import com.morpheusdata.model.ComputeServerGroup
 import com.morpheusdata.model.TaskResult
@@ -109,7 +110,26 @@ class HealthContext {
         Map<Long, String> names = hs.collectEntries { [(it.id): it.name] }
         morpheus.services.computeServer.list(new DataQuery().withFilter('cloud.id', cloudId))
                 .findAll { it.parentServer?.id && ids.contains(it.parentServer.id) }
-                .collect { ComputeServer v -> [name: v.externalId ?: v.name, host: names[v.parentServer.id], power: v.powerState?.name(), memory: v.maxMemory] }
+                .collect { ComputeServer v -> [name: v.externalId ?: v.name, host: names[v.parentServer.id], power: v.powerState?.name(), memory: v.maxMemory, tenant: tenantName(v.account)] }
+    }
+
+    /** Records can come partial, so a name that is missing is looked up. */
+    private String tenantName(Account a) {
+        a?.name ?: (a?.id ? Tenancy.loader(morpheus).call(a.id)?.name : null)
+    }
+
+    /** The cluster's Morpheus networks that carry a VLAN. */
+    List<Map> networks() {
+        Long cloudId = cluster.cloud?.id
+        if (!cloudId) {
+            return []
+        }
+        try {
+            morpheus.services.network.list(new DataQuery().withFilter('cloud.id', cloudId)).findAll { it.vlanId }
+                    .collect { [name: it.displayName ?: it.name, vlan: it.vlanId, gateway: it.gateway] }.unique { it.vlan }
+        } catch (Exception ignored) {
+            []
+        }
     }
 
     /**
@@ -134,7 +154,7 @@ class HealthContext {
         new HealthChecker.Input(cluster.name, l, hs.collect { ComputeServer s ->
             new HealthChecker.Host(s.name, inMaintenance(s), s.serverGroupMemberStatus?.name(), s.statusMessage, s.lastAgentUpdate?.time, facts[s.name], s.internalIp ?: s.externalIp, s.maxMemory)
         }, morpheusVms(hs), std, System.currentTimeMillis(),
-                [cpuModel: cluster.getConfigProperty('cpuModel'), notHighAvailability: cluster.getConfigProperty('notHighAvailability')])
+                [cpuModel: cluster.getConfigProperty('cpuModel'), notHighAvailability: cluster.getConfigProperty('notHighAvailability')], networks())
     }
 
     static final String CFG_TIME_SOURCES = 'healthTimeSources'
@@ -165,7 +185,7 @@ class HealthContext {
                                      running: it.facts?.vms?.count { v -> v.state == 'running' } ?: 0, frozen: it.facts?.frozen == true, kernel: it.facts?.kernel,
                                      os: it.facts?.osVersion, dStuck: it.facts?.dCount ?: 0] },
          results: rs.collect { [id: it.id, title: it.title, severity: it.severity.name(), status: it.status.name(), host: it.host, observed: it.observed,
-                                expected: it.expected, source: it.source, fix: it.fix, tier: it.tier.name(), hint: it.hint] },
+                                expected: it.expected, source: it.source, fix: it.fix, tier: it.tier.name(), hint: it.hint, impact: it.impact] },
          standards: in_.standards.toList()]
     }
 }

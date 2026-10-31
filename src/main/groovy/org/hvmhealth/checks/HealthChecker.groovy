@@ -33,6 +33,8 @@ class HealthChecker {
         String fix
         Tier tier = Tier.NONE
         String hint
+        /** Who this touches: "3 VMs: Acme (2), Globex (1)". Only operators ever see it. */
+        String impact
     }
 
     /** What Morpheus says about one host, next to what the host reports. */
@@ -57,6 +59,7 @@ class HealthChecker {
         Standards standards
         long nowMs = System.currentTimeMillis()
         Map clusterConfig = [:]       // cpuModel, notHighAvailability
+        List<Map> networks = []       // [name, vlan, gateway]: the cluster's Morpheus networks that carry a VLAN
     }
 
     private Input in_
@@ -89,8 +92,12 @@ class HealthChecker {
         migrationChecks(reachable)
         capacityChecks()
         haChecks(reachable)
+        vlanChecks(reachable)
+        storageLatencyChecks(reachable)
+        hardwareChecks(reachable)
         morpheusChecks()
         out.removeAll { it.id in st.disabledChecks }
+        addImpact()
         out.sort { a, b -> rank(a) <=> rank(b) ?: a.id <=> b.id ?: (a.host ?: '') <=> (b.host ?: '') }
     }
 
@@ -105,7 +112,127 @@ class HealthChecker {
             'Storage migration': /^(GFS|STO)-.*|^MIG-03$/,
             'Time'             : /^TIM-.*/,
             'Network'          : /^NET-.*/,
+            'Hardware'         : /^HW-.*/,
     ]
+
+    /** VMs by tenant, from Morpheus's view. */
+    static String impactOf(List<Map> vms) {
+        List<Map> on = vms.findAll { it.power == 'on' }
+        if (!on) {
+            return 'no running VMs'
+        }
+        String tenants = on.groupBy { (it.tenant ?: 'unknown') as String }.collect { k, v -> [k, v.size()] }.sort { -(it[1] as int) }.collect { "${it[0]} (${it[1]})" }.join(', ')
+        "${on.size()} running VM(s): ${tenants}".toString()
+    }
+
+    /** A finding on a host touches its VMs; a finding on the cluster touches all of them. */
+    private void addImpact() {
+        out.findAll { it.status in [Status.FAIL, Status.WARN] }.each { Result r ->
+            r.impact = impactOf(r.host ? in_.morpheusVms.findAll { it.host == r.host } : in_.morpheusVms)
+        }
+    }
+
+    // ------------------------------------------------------------------ VLANs carrying traffic
+
+    /**
+     * Passive: whether each host's uplink has heard traffic on each of the cluster's VLANs. Switches rarely advertise a trunk's
+     * allowed VLANs, but a VLAN its peers hear and a host does not is a likely pruned trunk. It is a warning only: a quiet
+     * VLAN also looks like this, because learned addresses age out after minutes. The active test settles it.
+     */
+    private void vlanChecks(List<Host> hs) {
+        if (hs.size() < 2) {
+            return
+        }
+        in_.networks.findAll { it.vlan }.each { Map n ->
+            Integer vlan = n.vlan as Integer
+            List<Host> hear = hs.findAll { it.facts.vlanSeen[vlan] }
+            List<Host> silent = hs - hear
+            if (hear) {
+                add('NET-11', "VLAN ${vlan} (${n.name}) carries traffic on every host".toString(), Severity.MEDIUM, silent ? Status.WARN : Status.PASS, null,
+                        silent ? "no traffic on ${silent*.name.join(', ')}; heard on ${hear*.name.join(', ')}".toString() : "heard on ${hear.size()} host(s)".toString(), 'heard on every host', 'plugin', null, Tier.NONE,
+                        silent ? "The trunk to ${silent*.name.join(', ')} may not pass this VLAN, so VMs moved there would lose their network. Put the host in maintenance mode and run its VLAN test to find out." : null)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ storage latency
+
+    private void storageLatencyChecks(List<Host> hs) {
+        int warn = st.intVal('storageWarnMs'), fail = st.intVal('storageFailMs'), statWarn = st.intVal('gfs2StatWarnMs')
+        hs.each { Host h ->
+            h.facts.storageStats.each { Map s ->
+                long ios = (s.reads as long) + (s.writes as long)
+                if (ios) {
+                    long avg = ((s.readMs as long) + (s.writeMs as long)) / ios as long
+                    add('STO-06', "Storage latency: ${s.wwid}".toString(), Severity.HIGH, avg >= fail ? Status.FAIL : (avg >= warn ? Status.WARN : Status.PASS), h.name,
+                            "${avg} ms average over ${ios} I/Os in 2 s, ${s.inflight} in flight".toString(), "< ${warn} ms".toString(), st.source('storageWarnMs'), null, Tier.NONE,
+                            avg >= warn ? 'Check the other hosts. If they are slow too, look at the array; if only this one is, its paths and NICs.' : null)
+                }
+            }
+            h.facts.gfsStatMs.each { String m, Integer ms ->
+                add('GFS-08', "GFS2 metadata responsive: ${m}".toString(), Severity.MEDIUM, ms > statWarn ? Status.WARN : Status.PASS, h.name, "${ms} ms to read a file's attributes".toString(), "<= ${statWarn} ms".toString(), st.source('gfs2StatWarnMs'))
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ hardware
+
+    private void hardwareChecks(List<Host> hs) {
+        int days = st.intVal('selDays')
+        hs.findAll { it.facts.mode == 'full' }.each { Host h ->
+            HostFacts f = h.facts
+            List<Map> psu = f.sensors.findAll { it.type == 'Power Supply' }
+            if (psu) {
+                List<Map> bad = psu.findAll { !(it.name =~ /(?i)redundan/) && !(it.status in ['ok', 'ns']) }
+                Map red = psu.find { it.name =~ /(?i)redundan/ }
+                boolean redundant = !red || red.reading =~ /(?i)fully redundant/
+                add('HW-01', 'Power supplies healthy and redundant', Severity.HIGH, bad ? Status.FAIL : (redundant ? Status.PASS : Status.WARN), h.name,
+                        bad ? "failing: ${bad*.name.join(', ')}".toString() : (red ? "redundancy: ${red.reading}".toString() : "${psu.size()} sensor(s) ok".toString()), 'fully redundant', 'plugin', null, Tier.NONE,
+                        !bad && !redundant ? 'One power supply or feed failing takes this host down, and its cluster membership with it. Check both supplies are cabled and the BMC redundancy policy is on.' : null)
+            }
+            if (f.edac) {
+                long ue = f.edac.sum { it.ue } as long, ce = f.edac.sum { it.ce } as long
+                add('HW-02', 'No memory errors', Severity.HIGH, ue ? Status.FAIL : (ce ? Status.WARN : Status.PASS), h.name, "${ue} uncorrectable, ${ce} correctable".toString(), '0', 'plugin', null, Tier.NONE,
+                        ue || ce ? 'Rising memory errors come before a host crash. An unclean crash freezes every GFS2 datastore until it is acknowledged, so move VMs off and plan a replacement.' : null)
+            }
+            List<Map> temps = f.sensors.findAll { it.type == 'Temperature' && !(it.status in ['ok', 'ns']) }
+            if (f.sensors.any { it.type == 'Temperature' }) {
+                add('HW-03', 'Temperatures within limits', Severity.HIGH, temps ? Status.FAIL : Status.PASS, h.name, temps ? temps.collect { "${it.name}: ${it.reading}" }.join(', ') : 'all ok', 'all ok', 'plugin')
+            }
+            List<String> recent = recentSerious(f, days)
+            if (f.sel) {
+                add('HW-04', 'No serious hardware events recently', Severity.MEDIUM, recent ? Status.WARN : Status.PASS, h.name, recent ? recent.take(4).join('; ') : "none in ${days} days".toString(), 'none', st.source('selDays'))
+            }
+            List<String> speeds = f.nics*.speed.findAll().unique()
+            if (speeds.size() > 1) {
+                add('HW-05', 'Uplinks at the same speed', Severity.MEDIUM, Status.WARN, h.name, f.nics.collect { "${it.name}=${it.speed}" }.join(', '), 'equal', 'plugin', null, Tier.NONE, 'A failover would change the bandwidth this host has.')
+            }
+        }
+        // firmware among identical servers: different models are expected to differ
+        hs.findAll { it.facts.hwProduct }.groupBy { it.facts.hwProduct }.each { String product, List<Host> same ->
+            if (same.size() > 1) {
+                [['BIOS', { HostFacts f -> f.hwBios }], ['management controller', { HostFacts f -> f.hwBmc }], ['NIC firmware', { HostFacts f -> f.nics*.firmware.findAll().unique().sort().join('/') }]].each { List spec ->
+                    Map<String, String> v = same.collectEntries { Host h -> [(h.name): (spec[1] as Closure<String>).call(h.facts)] }.findAll { k, x -> x } as Map<String, String>
+                    if ((v.values() as Set).size() > 1) {
+                        add('HW-06', "Same ${spec[0]} on identical servers (${product})".toString(), Severity.LOW, Status.WARN, null, v.collect { k, x -> "${k}=${x}" }.join(', '), 'equal', 'plugin')
+                    }
+                }
+            }
+        }
+    }
+
+    /** Serious events still asserted within the window. The host's own NOW decides "recent", since BMC dates are mm/dd/yy. */
+    private static List<String> recentSerious(HostFacts f, int days) {
+        long nowSec = f.now ?: 0L
+        f.sel.findAll { Map e -> e.asserted && e.text =~ /(?i)critical|uncorrect|non-recoverable|failure|fault|lost|ecc/ && !(e.text =~ /(?i)non-critical/) }.findAll { Map e ->
+            try {
+                long at = new java.text.SimpleDateFormat('MM/dd/yy').parse(e.date as String).time / 1000L as long
+                nowSec - at <= days * 86400L
+            } catch (java.text.ParseException ignored) {
+                false
+            }
+        }.collect { "${it.date} ${it.text}".toString() }
+    }
 
     /** Each area's worst status, and how many findings it has. */
     static List<Map> readiness(List<Result> rs) {
@@ -353,11 +480,11 @@ class HealthChecker {
         in_.hosts.each { Host h ->
             Map hb = reader.heartbeats.find { (it.host as String)?.equalsIgnoreCase(h.facts?.hostname ?: h.name) }
             if (h.maintenance) {
-                // HVM removes a host's heartbeat file while it is in maintenance mode, and writes it again on leaving
+                // HVM removes a host's heartbeat file about 90 s into maintenance mode, and writes it again 40-60 s after leaving
                 add('HB-01', 'Host heartbeat present', Severity.HIGH, Status.NA, h.name, 'host is in maintenance mode, which removes its heartbeat', 'one per host', 'morpheus')
             } else if (!hb?.ms) {
-                add('HB-01', 'Host heartbeat present', Severity.HIGH, Status.FAIL, h.name, 'no heartbeat file', 'one per host', 'morpheus', null, Tier.NONE,
-                        'Without a heartbeat HVM failover cannot judge this host: check its agent.')
+                add('HB-01', 'Host heartbeat present', Severity.HIGH, Status.WARN, h.name, 'no heartbeat file', 'one per host', 'morpheus', null, Tier.NONE,
+                        'Expected for up to a minute after a host leaves maintenance mode. If it stays, HVM failover cannot judge this host: check its agent.')
             } else {
                 long age = (nowMs - (hb.ms as Long)) / 1000L as long
                 add('HB-01', 'Host heartbeat current', Severity.HIGH, age * 1000L > maxAge ? Status.FAIL : Status.PASS, h.name, "${age} s old".toString(), "<= ${st.val('heartbeatMaxAgeSec')} s".toString(), st.source('heartbeatMaxAgeSec'))

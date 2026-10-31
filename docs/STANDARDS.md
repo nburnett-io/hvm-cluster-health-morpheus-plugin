@@ -48,6 +48,9 @@ newer than the documentation.
 | `maxNtpOffsetMs` | 100 | plugin | Offset from the time source |
 | `clusterCpuModel` | not set | plugin | The CPU model a cluster must use, HVM's equivalent of EVC |
 | `ringRttWarnMs` | 5 | plugin | Between corosync ring addresses |
+| `storageWarnMs`, `storageFailMs` | 20, 100 | plugin | Average I/O wait per LUN over 2 s |
+| `gfs2StatWarnMs` | 500 | plugin | Time to read a file's attributes, which takes a cluster lock |
+| `selDays` | 7 | plugin | How far back serious hardware log events count |
 | `hungTasksWarn` | 1 | plugin | Kernel reports in the last hour |
 | `iscsiErrorsWarn` | 1 | plugin | Session errors in 24 h |
 | `osVersion` | by layout | hpe | |

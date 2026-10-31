@@ -131,6 +131,7 @@
       put(box, table(['Status', 'Severity', 'Check', 'Host', 'Observed', 'Expected', 'Source', ''], rows.map(function (r) {
         var check = el('div', {}, [el('strong', { text: r.id }), ' ' + r.title]);
         if (r.hint) check.appendChild(el('div', { 'class': 'hh-hint', text: r.hint }));
+        if (r.impact) check.appendChild(el('div', { 'class': 'hh-impact', text: 'Affects: ' + r.impact }));
         var f = fixButton(r);
         var act = f ? el('div', {}, [f, el('span', { 'class': 'hh-tier', text: TIER[r.tier] || '' })]) : '';
         return [el('span', { 'class': 'hh-nw st-' + r.status, text: r.status }), el('span', { 'class': 'hh-nw', text: r.severity }), check, el('span', { 'class': 'hh-nw', text: r.host || 'cluster' }), r.observed, r.expected, el('span', { 'class': 'hh-nw', text: r.source }), act];
@@ -163,18 +164,72 @@
       put(box, wrap);
     }
 
+    /** The answer to "can I take this host down?", and the way to take it out of the cluster. */
+    function renderPreflight(box, p) {
+      box.innerHTML = '';
+      var d = el('div', { 'class': 'hh-panel' }, [
+        el('div', {}, [el('span', { 'class': 'hh-v-' + p.verdict, text: p.host + ': ' + (p.verdict === 'GO' ? 'can be taken down' : (p.verdict === 'CAUTION' ? 'can be taken down, with care' : 'do not take it down yet')) })]),
+        el('div', { 'class': 'hh-muted', text: 'On it now: ' + p.impact + '. ' + (p.votesAfter != null ? 'Without it: ' + p.votesAfter + ' votes, ' + p.quorum + ' needed.' : '') })]);
+      (p.blockers || []).forEach(function (b) { d.appendChild(el('div', { 'class': 'hh-err', text: b })); });
+      (p.cautions || []).forEach(function (b) { d.appendChild(el('div', { 'class': 'hh-hint', text: b })); });
+      if (p.moves && p.moves.length) d.appendChild(table(['VM', 'Tenant', 'Memory', 'Can move to'], p.moves.map(function (m) {
+        return [m.vm, m.tenant || '', m.memoryGiB + ' GiB', m.targets.length ? m.targets.join(', ') : el('span', { 'class': 'st-FAIL', text: 'nowhere' })];
+      })));
+      var e = p.eject || {};
+      d.appendChild(el('h4', { text: 'Taking it out of the cluster' }));
+      d.appendChild(el('div', { 'class': 'hh-hint', text: 'Maintenance mode empties a host but leaves it a cluster member. If it then powers off or is rebuilt, every GFS2 datastore on the other hosts freezes until it is acknowledged as fenced. Eject it first.' }));
+      d.appendChild(el('ol', {}, (e.steps || []).map(function (s) { return el('li', { text: s }); })));
+      if (e.warning) d.appendChild(el('div', { 'class': 'hh-hint', text: e.warning }));
+      (e.blockers || []).forEach(function (b) { d.appendChild(el('div', { 'class': 'hh-err', text: 'Before ejecting: ' + b })); });
+      if (e.ready && p.ejectEnabled && canEmergency()) {
+        var typed = el('input', { type: 'text', placeholder: 'Type ' + p.host });
+        d.appendChild(el('div', { 'class': 'hh-row' }, [typed, btn('Eject from cluster', function (ev) {
+          ev.target.disabled = true;
+          call('eject', { host: p.host, confirm: typed.value }, true).then(function (j) { follow(j, refreshAfter); }, function (x) { window.alert(x.message); ev.target.disabled = false; });
+        }, 'btn-danger')]));
+      } else if (e.ready && !p.ejectEnabled) {
+        d.appendChild(el('div', { 'class': 'hh-muted', text: 'Safe eject is ready to run, but is switched off in the plugin settings.' }));
+      }
+      box.appendChild(d);
+    }
+
+    /** Master tenant only: every cluster, worst first. */
+    function loadFleet() {
+      var sec = root.querySelector('[data-section="fleet"]');
+      if (!state.status || !state.status.isMaster) return;
+      call('fleet').then(function (rows) {
+        sec.classList.remove('hh-hidden');
+        put(sec.querySelector('.ph-body'), table(['Cluster', 'Owner', 'Health', 'Layout', 'Failing', 'Warnings', 'Not ready for', 'Last check'], rows.map(function (c) {
+          var bad = (c.readiness || []).filter(function (a) { return a.status === 'FAIL'; }).map(function (a) { return a.area; });
+          return [el('a', { href: '/infrastructure/clusters/' + c.id, text: c.name }), c.owner || '', el('span', { 'class': 'hh-nw hh-ov-' + c.overall, text: c.frozen ? 'FROZEN' : c.overall }), c.layout || '',
+            c.counts ? c.counts.fail : '', c.counts ? c.counts.warn : '', bad.join(', '), c.at ? ago(c.at) : ''];
+        })));
+      }, function () { /* not offered to this user */ });
+    }
+
     function renderHosts() {
       var v = state.view;
       if (!v) { put(body('hosts'), null); return; }
-      var wrap = el('div', {}), out = el('pre', {});
+      var wrap = el('div', {}), out = el('pre', {}), panel = el('div', {});
       wrap.appendChild(table(['Host', 'Answered', 'Maintenance', 'Running VMs', 'Frozen', 'Stuck tasks', 'OS', 'Kernel', ''], v.hosts.map(function (h) {
-        return [h.name, h.answered ? 'yes' : el('span', { 'class': 'st-FAIL', text: 'NO' }), h.maintenance ? 'yes' : 'no', h.running,
-          h.frozen ? el('span', { 'class': 'st-FAIL', text: 'FROZEN' }) : 'no', h.dStuck, h.os || '', h.kernel || '',
+        var acts = el('div', { 'class': 'hh-row' }, [
+          btn('Can I take it down?', function () {
+            panel.innerHTML = ''; panel.appendChild(el('div', { 'class': 'hh-panel hh-muted', text: 'Checking ' + h.name + '…' }));
+            call('preflight', { host: h.name }).then(function (p) { renderPreflight(panel, p); }, function (e) { panel.innerHTML = ''; panel.appendChild(el('div', { 'class': 'hh-panel hh-err', text: e.message })); });
+          }),
+          canFix() ? btn('Test VLANs', function (ev) {
+            if (!window.confirm('Test every VLAN on each uplink of ' + h.name + '?\n\nThis moves its active uplink, so it needs maintenance mode with no VMs; the plugin checks again and refuses otherwise.')) return;
+            ev.target.disabled = true;
+            call('vlan-test', { host: h.name }, true).then(function (j) { follow(j, function () { ev.target.disabled = false; }); }, function (e) { window.alert(e.message); ev.target.disabled = false; });
+          }) : null,
           btn('Raw', function () {
             out.textContent = 'Reading ' + h.name + '…';
             call('raw', { host: h.name }).then(function (r) { out.textContent = r.output; }, function (e) { out.textContent = e.message; });
-          })];
+          })]);
+        return [el('span', { 'class': 'hh-nw', text: h.name }), h.answered ? 'yes' : el('span', { 'class': 'st-FAIL', text: 'NO' }), h.maintenance ? 'yes' : 'no', h.running,
+          h.frozen ? el('span', { 'class': 'st-FAIL', text: 'FROZEN' }) : 'no', h.dStuck, h.os || '', h.kernel || '', acts];
       })));
+      wrap.appendChild(panel);
       wrap.appendChild(out);
       put(body('hosts'), wrap);
     }
@@ -232,6 +287,7 @@
         state.status = s;
         (s.jobs || []).forEach(function (j) { follow(j, refreshAfter); });
         showView(s.last || null);
+        loadFleet();
       }, function (e) { put(body('summary'), el('div', { 'class': 'hh-err', text: e.message })); });
     }
 

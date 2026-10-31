@@ -134,6 +134,11 @@ class PluginSpec extends Specification {
         hasProperty(com.morpheusdata.model.Account, 'parentAccount')
         hasProperty(com.morpheusdata.model.Account, 'masterAccount')
         OptionType.InputType.TEXTAREA != null
+        hasMethod(MorpheusServices, 'getNetwork', 0)
+        hasMethod(MorpheusServices.getMethod('getNetwork').returnType, 'list', 1)
+        ['vlanId', 'gateway', 'displayName', 'name'].every { hasProperty(com.morpheusdata.model.Network, it) }
+        hasProperty(ComputeServer, 'account')
+        hasProperty(com.morpheusdata.model.Account, 'name')
         ['category', 'uniqueId', 'refType', 'refId', 'status', 'statusMessage', 'name', 'account', 'active'].every { hasProperty(com.morpheusdata.model.OperationNotification, it) }
         hasMethod(MorpheusServices.getMethod('getCluster').returnType, 'save', 1)
         hasMethod(ComputeServerGroup, 'getConfigProperty', 1)

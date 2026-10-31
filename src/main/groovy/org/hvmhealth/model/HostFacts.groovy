@@ -49,6 +49,15 @@ class HostFacts {
     List<String> usableCpus = []                 // named CPU models libvirt says this host can run
     Long memTotalKb, memAvailKb
     List<Map> pools = []                         // [name, state]
+    Map<Integer, Integer> vlanSeen = [:]         // VLAN -> MAC addresses learned from the uplinks
+    List<Map> storageStats = []                  // [wwid, reads, readMs, writes, writeMs, inflight] over 2 s
+    Map<String, Integer> gfsStatMs = [:]         // mount -> ms to stat a heartbeat file
+    Map<String, Integer> gfsInUse = [:]          // mount -> processes with it open
+    String hwProduct, hwBios, hwBmc
+    List<Map> nics = []                          // [name, firmware, speed]
+    List<Map> edac = []                          // [mc, ce, ue]
+    List<Map> sensors = []                       // [type, name, status, reading]
+    List<Map> sel = []                           // [date, text, asserted]
     /** Null when the probe had no LLDP section at all. */
     Boolean lldpAvailable
     Map<String, Map> neighbours = [:]            // local interface -> [chassis, port, pvid, via]
@@ -180,6 +189,24 @@ class HostFacts {
         virtswitchFiles = int0(lo.VIRTSWITCH_FILES)
 
         parseLldp(sections.lldp)
+        rows('vlans', 'VLAN_SEEN').each { if (it.size() == 2 && it[0].isInteger() && it[1].isInteger()) { vlanSeen[it[0] as Integer] = (vlanSeen[it[0] as Integer] ?: 0) + (it[1] as Integer) } }
+        storageStats = rows('storage', 'STAT').findAll { it.size() >= 6 }.collect {
+            [wwid: it[0], reads: lng(it[1]) ?: 0L, readMs: lng(it[2]) ?: 0L, writes: lng(it[3]) ?: 0L, writeMs: lng(it[4]) ?: 0L, inflight: lng(it[5]) ?: 0L]
+        }
+        rows('gfs2_fs', 'IN_USE').each { if (it.size() == 2 && it[1].isInteger()) { gfsInUse[it[0]] = it[1] as Integer } }
+        rows('gfs2_fs', 'GFS_STAT').each { if (it.size() == 2 && it[1].isInteger()) { gfsStatMs[it[0]] = it[1] as Integer } }
+        Map hw = kv('hardware')
+        hwProduct = hw.HW_PRODUCT ?: null
+        hwBios = hw.HW_BIOS ?: null
+        hwBmc = hw.HW_BMC ?: null
+        nics = rows('hardware', 'NIC').collect { [name: it[0], firmware: it.size() > 1 ? it[1] : null, speed: it.size() > 2 ? it[2] : null] }
+        edac = rows('hardware', 'EDAC').findAll { it.size() == 3 }.collect { [mc: it[0], ce: lng(it[1]) ?: 0L, ue: lng(it[2]) ?: 0L] }
+        sensors = rows('hardware', 'SDR').findAll { it.size() >= 4 }.collect { [type: it[0], name: it[1].trim(), status: it[2].trim(), reading: it[3].trim()] }
+        // "  21 | 07/19/26 | 06:45:28 EDT | Temperature Inlet Temp | Upper Critical going high | Asserted | Reading 47"
+        sel = (sections.hardware ?: []).findAll { it.startsWith('SEL=') }.collect { String l ->
+            List<String> p = l.substring(4).split(/\s*\|\s*/) as List<String>
+            p.size() >= 5 ? [date: p[1], text: p[3..<(p.size() > 5 ? 5 : p.size())].join(' '), asserted: p.any { it.trim() == 'Asserted' }] : null
+        }.findAll()
 
         Map ti = kv('time')
         ntp = yes(ti.NTP)

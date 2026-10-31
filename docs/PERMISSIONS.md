@@ -12,9 +12,11 @@ A user needs **both**:
 
 | Permission | Access | Allows |
 |---|---|---|
-| Cluster Health | Read | The tab, checks, raw probe output |
-| Cluster Health | Full | Safe and maintenance fixes; defining the cluster's time source |
-| Cluster Health Emergency Actions | Full | Acknowledging a failed node as fenced |
+| Cluster Health | Read | The tab, checks, pre-flights, raw probe output |
+| Cluster Health | Full | Safe and maintenance fixes, VLAN tests, defining the cluster's time source |
+| Cluster Health Emergency Actions | Full | Acknowledging a failed node as fenced; safe eject |
+
+The all-clusters view is for the master tenant only, whatever a role grants. Findings show which tenants are affected, which is why customers must never reach them.
 
 Everyone else gets no tab, and every route refuses them. Morpheus answers 404 for a route the role lacks, and the plugin answers 403 to
 a non-operator whose role does have it.
@@ -39,4 +41,4 @@ every record it returns on 9.1. Keeping customers out therefore relies on two th
 - **Clusters belong to the master tenant or a second-tier tenant.** A customer tenant made the owner of a cluster would be its operator.
 - **The Operator tenants setting lists only tenants that run infrastructure.**
 
-Alarms go to the tenant that owns the cluster, so a master tenant does not see the alarms of a cluster a second-tier tenant owns, though it can open that cluster's tab.
+Alarms go to the tenant that owns the cluster, and the master tenant gets its own copy.

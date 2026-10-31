@@ -12,6 +12,7 @@ import groovy.util.logging.Slf4j
 import org.hvmhealth.ClusterHealthPlugin
 import org.hvmhealth.checks.HealthChecker
 import org.hvmhealth.fixes.Fixes
+import org.hvmhealth.fixes.Preflight
 import org.hvmhealth.model.HostFacts
 import org.hvmhealth.standards.Standards
 
@@ -49,6 +50,10 @@ class HealthController implements PluginController {
                 Route.build('/hvm-health/raw', 'raw', read),
                 Route.build('/hvm-health/fix', 'fix', full),
                 Route.build('/hvm-health/time-source', 'timeSource', full),
+                Route.build('/hvm-health/preflight', 'preflight', read),
+                Route.build('/hvm-health/fleet', 'fleet', read),
+                Route.build('/hvm-health/vlan-test', 'vlanTest', full),
+                Route.build('/hvm-health/eject', 'eject', emergency),
                 Route.build('/hvm-health/fence-plan', 'fencePlan', emergency),
                 Route.build('/hvm-health/fence-ack', 'fenceAck', emergency),
         ]
@@ -128,6 +133,7 @@ class HealthController implements PluginController {
                 standardsError = e.message
             }
             ok([cluster: ctx.cluster.name, layout: ctx.layout().label, last: HealthMonitor.LAST[ctx.cluster.id], standards: standards, standardsError: standardsError,
+                isMaster: Tenancy.isMaster(m.user?.account, Tenancy.loader(morpheus)),
                 canFix: canFix(m.user), canEmergency: canEmergency(m.user),
                 monitorMinutes: HealthMonitor.quickMinutes(s), fullHours: HealthMonitor.fullHours(s),
                 autoFixSafe: s.autoFixSafe in [true, 'true', 'on'], autoFixMaintenance: s.autoFixMaintenance in [true, 'true', 'on'],
@@ -170,6 +176,69 @@ class HealthController implements PluginController {
             ok(Jobs.start('check', ctx.cluster.id, user(m)) { List<String> progress ->
                 progress << "Verifying every host against ${servers.join(', ') ?: 'no defined time source'}".toString()
                 HealthMonitor.run(morpheus, ctx, s, 'quick', false)
+            }.toMap())
+        }
+    }
+
+    /** "Can I take this host down?" Read-only. */
+    def preflight(ViewModel<Map> m) {
+        guarded {
+            HealthContext ctx = operatorCtx(m)
+            Map s = settings()
+            String host = p(m).host as String
+            Map plan = Preflight.hostDown(ctx.input(ctx.probe('quick'), s.siteStandards as String), host)
+            plan.ejectEnabled = s.enableEject in [true, 'true', 'on']
+            ok(plan)
+        }
+    }
+
+    /** Every cluster, for the master tenant only: other tenants see their own tab, not each other's clusters. */
+    def fleet(ViewModel<Map> m) {
+        guarded {
+            if (!Tenancy.isMaster(m.user?.account, Tenancy.loader(morpheus))) {
+                throw new SecurityException('The fleet view is for the master tenant.')
+            }
+            ok(HealthMonitor.fleet(morpheus))
+        }
+    }
+
+    def vlanTest(ViewModel<Map> m) {
+        guarded {
+            HealthContext ctx = operatorCtx(m)
+            String host = p(m).host as String
+            if (!ctx.hosts.any { it.name == host }) {
+                throw new IllegalArgumentException("${host} is not in cluster ${ctx.cluster.name}")
+            }
+            List<Map> extra = []
+            if (p(m).vlan && p(m).gateway) {
+                extra << [vlan: p(m).vlan, gateway: p(m).gateway]
+            }
+            Map s = settings()
+            User who = m.user
+            ok(Jobs.start("VLAN test: ${host}".toString(), ctx.cluster.id, user(m)) { List<String> progress ->
+                HostOps.vlanTest(morpheus, ctx, host, extra, who, progress, s)
+            }.toMap())
+        }
+    }
+
+    /** Off until enabled in the settings, and confirmed by typing the host's name. */
+    def eject(ViewModel<Map> m) {
+        guarded {
+            HealthContext ctx = operatorCtx(m)
+            Map s = settings()
+            if (!(s.enableEject in [true, 'true', 'on'])) {
+                throw new IllegalStateException('Safe eject is switched off in the plugin settings.')
+            }
+            String host = p(m).host as String
+            if (!host || !ctx.hosts.any { it.name == host }) {
+                throw new IllegalArgumentException("${host} is not in cluster ${ctx.cluster.name}")
+            }
+            if (!(p(m).confirm as String)?.equalsIgnoreCase(host)) {
+                throw new IllegalArgumentException("Type the host name, ${host}, to confirm")
+            }
+            User who = m.user
+            ok(Jobs.start("eject: ${host}".toString(), ctx.cluster.id, user(m)) { List<String> progress ->
+                HostOps.eject(morpheus, ctx, host, who, progress, s)
             }.toMap())
         }
     }

@@ -71,9 +71,13 @@ if [ "$FS_SAFE" = 1 ]; then
   (
     for m in $GFS2_TARGETS; do
       echo "USAGE=$m|$(df -B1 --output=size,used "$m" 2>/dev/null | awk 'NR==2{print $1"|"$2}')"
+      echo "IN_USE=$m|$(fuser -m "$m" 2>/dev/null | wc -w)"
       find "$m/mvm-hb" -mindepth 3 -maxdepth 3 -name hb.properties 2>/dev/null | while read -r f; do
         echo "HB=$(sed -n 's/^hostname=//p' "$f")|$(sed -n 's/^lastUpdated=//p' "$f")"
       done
+      # stat takes a cluster lock when another host has just written the file: the time a VM's metadata access would wait
+      f="$(find "$m/mvm-hb" -mindepth 3 -maxdepth 3 -name hb.properties 2>/dev/null | head -1)"
+      if [ -n "$f" ]; then s="$(date +%s%N)"; stat "$f" >/dev/null 2>&1; e="$(date +%s%N)"; echo "GFS_STAT=$m|$(( (e-s)/1000000 ))"; fi
     done
   ) > "$OUT" 2>/dev/null &
   JOB=$!
@@ -138,6 +142,25 @@ if [ "$MODE" = full ]; then
   done
 fi
 
+sec vlans
+# VLANs this host has heard traffic on from its uplinks: a VLAN its peers hear and it does not points at the trunk
+t 5 bridge fdb show | grep -v permanent | awk '{d="";v="";for(i=1;i<=NF;i++){if($i=="dev")d=$(i+1); if($i=="vlan")v=$(i+1)}; if(v!="" && d!~/^vnet/)print v}' | sort -n | uniq -c | awk '{print "VLAN_SEEN="$2"|"$1}'
+for br in $(t 5 ovs-vsctl list-br); do
+  ups=" $(t 5 ovs-vsctl list-ports "$br" | grep -v '^vnet' | while read -r p; do t 5 ovs-vsctl get Interface "$p" ofport; done | tr '\n' ' ') "
+  t 5 ovs-appctl fdb/show "$br" | awk -v ups="$ups" 'NR>1 && $2!="0" && index(ups," "$1" ")>0 {print $2}' | sort -n | uniq -c | awk '{print "VLAN_SEEN="$2"|"$1}'
+done
+
+sec storage
+declare -A BEFORE
+for d in /sys/block/dm-*; do
+  n="$(cat "$d/dm/name" 2>/dev/null)"; case "$n" in 3*) BEFORE["$d"]="$(cat "$d/stat")";; esac
+done
+sleep 2
+for d in "${!BEFORE[@]}"; do
+  read -r r1 _ _ rt1 w1 _ _ wt1 _ <<< "${BEFORE[$d]}"
+  read -r r2 _ _ rt2 w2 _ _ wt2 fl _ <<< "$(cat "$d/stat")"
+  echo "STAT=$(cat "$d/dm/name")|$((r2-r1))|$((rt2-rt1))|$((w2-w1))|$((wt2-wt1))|$fl"
+done
 sec layout
 echo "OVS_BRIDGES=$(t 5 ovs-vsctl list-br | tr '\n' ',')"
 echo "VIRTSWITCH_FILES=$(ls /etc/netplan/ 2>/dev/null | grep -c hvmcli-virtswitch)"
@@ -182,6 +205,19 @@ if [ "$MODE" = full ]; then
   sec bmc
   echo "BMC_IP=$(t 15 ipmitool lan print | awk -F': *' '/^IP Address +:/{print $2}')"
   echo "WATCHDOG=$(ls /dev/watchdog* 2>/dev/null | head -1)"
+  sec hardware
+  echo "HW_PRODUCT=$(t 5 dmidecode -s system-product-name)"
+  echo "HW_BIOS=$(t 5 dmidecode -s bios-version)"
+  echo "HW_BMC=$(t 10 ipmitool mc info | awk -F': *' '/^Firmware Revision/{print $2}')"
+  for b in /proc/net/bonding/*; do
+    [ -r "$b" ] || continue
+    for s in $(awk '/^Slave Interface:/{print $3}' "$b"); do
+      echo "NIC=$s|$(t 3 ethtool -i "$s" | awk -F': ' '/^firmware-version/{print $2}')|$(cat "/sys/class/net/$s/speed" 2>/dev/null)"
+    done
+  done
+  for m in /sys/devices/system/edac/mc/mc*; do [ -d "$m" ] && echo "EDAC=$(basename "$m")|$(cat "$m/ce_count")|$(cat "$m/ue_count")"; done
+  for ty in 'Power Supply' Temperature; do t 15 ipmitool sdr type "$ty" | awk -F' *\\| *' -v ty="$ty" '{print "SDR="ty"|"$1"|"$3"|"$5}'; done
+  t 15 ipmitool sel elist | tail -40 | sed 's/^/SEL=/'
 fi
 
 sec end

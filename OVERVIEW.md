@@ -2,8 +2,8 @@
 
 ## The failure this was built around
 
-A three-host HVM cluster with one GFS2 datastore on an iSCSI LUN. One host left the cluster uncleanly while being
-rebuilt. What followed, in order:
+A three-host HVM cluster with one GFS2 datastore on an iSCSI LUN. One host was being taken out to move it to a new cluster on a
+newer layout, and it left uncleanly: the survivors logged that they never received its leave message. What followed, in order:
 
 1. Corosync on the survivors lost the node and formed a new membership. They kept quorum, 2 of 3 votes.
 2. DLM stopped the lockspace and waited for the node to be fenced. Pacemaker is masked by design on HVM, so the normal fence call
@@ -47,8 +47,19 @@ with a deadline. `timeout` cannot kill a process in uninterruptible sleep, so a 
 layout code only.
 
 **Maintenance mode is `status == 'maintenance'`.** On 9.1.0.1 the member status is empty for plugins and the REST
-`maintenanceMode` field has no counterpart on the model. Maintenance mode also removes the host's heartbeat file, so a
-missing heartbeat is expected there, and the host stays in corosync, so powering it off still freezes the cluster.
+`maintenanceMode` field has no counterpart on the model. Maintenance mode also removes the host's heartbeat file, measured at about
+90 s after entering, and it returns 40-60 s after leaving, so a missing heartbeat is expected around then. The host stays in corosync
+throughout, so powering it off still freezes the cluster.
+
+**A clean leave needs no fencing.** DLM fences a node that fails while it is in a lockspace. Safe eject removes the reason: unmounting
+GFS2 leaves the lockspace first. That is why the order is unmount, dlm, corosync, then the nodelist, and why it stops if a survivor shows a wait.
+
+**The VLAN test runs detached.** It moves the active uplink, which can cut off the very agent that started it, so it runs under `setsid`, writes
+to a file the plugin polls, and has a timer that puts the uplink back whatever happens. A test that produces no results is a failure,
+never a pass: an early build reported success after a shell quoting error stopped it testing anything.
+
+**A gateway silent on every uplink is reported differently** from one silent on one uplink. The second is a pruned trunk; the first says more
+about the gateway.
 
 **Tenancy is by ownership.** See [docs/PERMISSIONS.md](docs/PERMISSIONS.md).
 

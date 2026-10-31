@@ -8,6 +8,10 @@
   .hvm-health th { white-space: nowrap; }
   .hvm-health td { white-space: normal; }
   .hvm-health td > .hh-nw, .hvm-health td.hh-nw { white-space: nowrap; }
+  .hvm-health .hh-hidden { display: none; }
+  .hvm-health .hh-panel { border: 1px solid rgba(128,128,128,.4); padding: 10px 12px; margin: 8px 0; }
+  .hvm-health .hh-v-GO { color: #2e7d32; font-weight: 600; } .hvm-health .hh-v-CAUTION { color: #b26a00; font-weight: 600; } .hvm-health .hh-v-NO { color: #c62828; font-weight: 600; }
+  .hvm-health .hh-impact { font-size: 11px; opacity: .85; margin-top: 2px; }
   .hvm-health .hh-time-input { width: 340px; max-width: 100%; padding: 3px 6px; flex: 0 1 auto; }
   .hvm-health .st-PASS { color: #2e7d32; } .hvm-health .st-FAIL { color: #c62828; font-weight: 600; }
   .hvm-health .st-WARN { color: #b26a00; } .hvm-health .st-NA { opacity: .55; }
@@ -28,6 +32,7 @@
 </style>
 <div class="hvm-health" data-cluster-id="{{id}}"
      data-plugin-react-root data-plugin-key="hvmClusterHealth" data-plugin-entry="clusterTab">
+  <section data-section="fleet" class="hh-hidden"><h3>All clusters</h3><div class="ph-body"></div></section>
   <section data-section="summary"><h3>Cluster health</h3>
     <div class="hh-row"><button type="button" class="btn btn-primary btn-sm" data-act="check">Run full check</button>
       <span class="hh-muted">Read-only. Compares every host with the others and with this layout's standards.</span></div>
