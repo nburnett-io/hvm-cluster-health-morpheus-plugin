@@ -37,9 +37,9 @@ class FindingHistory {
     private static final Map<Long, Object> LOCKS = new ConcurrentHashMap<>()
     private static volatile long lastPrune = 0
 
-    /** NET-11's title carries a Morpheus network's name, which can be a tenant's, and NET-12's and NET-13's end in a VM's. */
+    /** NET-11's title carries a Morpheus network's name, which can be a tenant's, and NET-12, NET-13 and SEC-05 end in a VM's. */
     static String safeTitle(String id, String title) {
-        id == 'NET-11' ? title?.replaceFirst(/ \(.*\) carries/, ' carries') : (id in ['NET-12', 'NET-13'] ? title?.replaceFirst(/: .*$/, '') : title)
+        id == 'NET-11' ? title?.replaceFirst(/ \(.*\) carries/, ' carries') : (id in ['NET-12', 'NET-13', 'SEC-05'] ? title?.replaceFirst(/: .*$/, '') : title)
     }
 
     /** A renamed network is the same finding; two VMs on one host are two, so the VM's name stays in the key, hashed. */
@@ -53,7 +53,7 @@ class FindingHistory {
 
     /** What this run can vouch for: a finding that is absent only counts as cleared if the run could have seen it. */
     static Map coverage(HealthChecker.Input in_, boolean fullKnown) {
-        [hosts: in_.hosts*.name as Set, answered: in_.hosts.findAll { it.facts?.complete }*.name as Set, fullKnown: fullKnown]
+        [hosts: in_.hosts*.name as Set, answered: in_.hosts.findAll { it.facts?.complete }*.name as Set, fullKnown: fullKnown, portsUnread: Isolation.portsUnread(in_)]
     }
 
     private static boolean clearable(Map e, Map cover) {
@@ -63,6 +63,9 @@ class FindingHistory {
         }
         if (e.id in HealthMonitor.FULL_ONLY && !cover.fullKnown) {
             return false   // only a full check answers this, and none has run since the plugin loaded
+        }
+        if (e.id in Isolation.CHECKS && (cover.portsUnread as Set)?.contains(e.host)) {
+            return false   // the host answered, and its ports were not read
         }
         if (e.host) {
             return !hosts.contains(e.host) || (cover.answered as Set).contains(e.host)   // a host no longer in the cluster has nothing left to report
@@ -151,12 +154,18 @@ class FindingHistory {
     static Map summaryOf(Map view) {
         [overall: view.overall, at: view.at, mode: view.mode, layout: view.layout, counts: view.counts,
          notReady: (view.readiness as List<Map>)?.findAll { it.status?.toString() == 'FAIL' }?.collect { it.area },
-         frozen: (view.hosts as List<Map>)?.any { it.frozen } ?: false]
+         frozen: (view.hosts as List<Map>)?.any { it.frozen } ?: false,
+         failing: idsOf(view, 'FAIL'), warning: idsOf(view, 'WARN')]
+    }
+
+    private static List<String> idsOf(Map view, String status) {
+        (view.results as List<Map>)?.findAll { it.status == status }?.collect { it.id as String }?.unique()
     }
 
     /** Stamps each current finding with when it first appeared. */
     static void stamp(Map view, Map doc) {
         Map<String, Map> open = (doc.episodes as List<Map>).findAll { it.cleared == null }.collectEntries { [(it.k): it] }
+        view.historySince = doc.since   // a finding first seen then may be far older, which FleetCorrelator needs to know
         (view.results as List<Map>)?.each { Map r ->
             if (r.status in ['FAIL', 'WARN']) {
                 r.firstSeen = open[key(r.id as String, r.host as String, r.title as String)]?.first
@@ -261,10 +270,12 @@ class FindingHistory {
             if (!live) {
                 return true
             }
-            MorpheusSession.run(morpheus) {
-                morpheus.services.operationData.list(new DataQuery().withFilter('category', CATEGORY))
-                        .findAll { it.category == CATEGORY && !live.contains(it.refId) && now - (it.refDate?.time ?: 0L) > RETENTION_MS }
-                        .each { morpheus.services.operationData.remove(it) }
+            [CATEGORY, CapacityTrend.CATEGORY, Availability.CATEGORY].each { String category ->
+                MorpheusSession.run(morpheus) {
+                    morpheus.services.operationData.list(new DataQuery().withFilter('category', category))
+                            .findAll { it.category == category && !live.contains(it.refId) && now - (it.refDate?.time ?: 0L) > RETENTION_MS }
+                            .each { morpheus.services.operationData.remove(it) }
+                }
             }
         } catch (Throwable e) {
             log.warn("cluster health history clean-up failed: ${e.message}")

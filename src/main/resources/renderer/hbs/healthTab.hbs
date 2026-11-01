@@ -6,16 +6,25 @@
   .hvm-health table { width: 100%; border-collapse: collapse; font-size: 12px; }
   .hvm-health th, .hvm-health td { text-align: left; padding: 4px 6px; border-bottom: 1px solid rgba(128,128,128,.25); vertical-align: top; overflow-wrap: break-word; }
   .hvm-health th { white-space: nowrap; }
-  .hvm-health td { white-space: normal; }
+  /* anywhere, unlike break-word, also lets a long name stop holding its column wide. A heading keeps its column at least as wide as its longest word. */
+  .hvm-health td { white-space: normal; overflow-wrap: anywhere; }
   .hvm-health td > .hh-nw, .hvm-health td.hh-nw { white-space: nowrap; }
+  .hvm-health td .hh-word { overflow-wrap: normal; } /* short words such as a status, which break at a space or not at all */
+  /* these colours are mid-tones, as Morpheus's theme can be light or dark and nothing here can tell: each reads at about 4:1 on either */
   .hvm-health .hh-hidden { display: none; }
   .hvm-health .hh-panel { border: 1px solid rgba(128,128,128,.4); padding: 10px 12px; margin: 8px 0; }
-  .hvm-health .hh-v-GO { color: #2e7d32; font-weight: 600; } .hvm-health .hh-v-CAUTION { color: #b26a00; font-weight: 600; } .hvm-health .hh-v-NO { color: #c62828; font-weight: 600; }
+  .hvm-health .hh-v-GO { color: #388e3c; font-weight: 600; } .hvm-health .hh-v-CAUTION { color: #b26a00; font-weight: 600; } .hvm-health .hh-v-NO { color: #e53935; font-weight: 600; }
   .hvm-health .hh-impact { font-size: 11px; opacity: .85; margin-top: 2px; }
+  .hvm-health .hh-incident td { padding-top: 10px; font-weight: 600; }
+  .hvm-health .hh-incident .hh-impact { font-weight: normal; }
+  .hvm-health .hh-member { padding-left: 12px; }
+  .hvm-health .hh-window { padding: 8px 12px; margin: 0 0 8px; border-left: 5px solid #1565c0; }
+  .hvm-health .hh-window-minutes { width: 80px; padding: 3px 6px; flex: none; }
+  .hvm-health .hh-window-note { flex: 1 1 240px; min-width: 0; padding: 3px 6px; }
   .hvm-health .hh-time-input { width: 340px; max-width: 100%; padding: 3px 6px; flex: 0 1 auto; }
-  .hvm-health .st-PASS { color: #2e7d32; } .hvm-health .st-FAIL { color: #c62828; font-weight: 600; }
-  .hvm-health .st-WARN { color: #b26a00; } .hvm-health .st-NA { opacity: .55; } .hvm-health .st-NOT_CHECKED { color: #546e7a; font-style: italic; }
-  .hvm-health .hh-muted { opacity: .7; } .hvm-health .hh-err { color: #c62828; }
+  .hvm-health .st-PASS { color: #388e3c; } .hvm-health .st-FAIL { color: #e53935; font-weight: 600; }
+  .hvm-health .st-WARN { color: #b26a00; } .hvm-health .st-NA { opacity: .55; } .hvm-health .st-NOT_CHECKED { color: #6b8794; font-style: italic; }
+  .hvm-health .hh-muted { opacity: .7; } .hvm-health .hh-err { color: #e53935; }
   .hvm-health .hh-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
   .hvm-health .hh-row > span, .hvm-health .hh-row > label { flex: 1 1 260px; min-width: 0; white-space: normal; }
   .hvm-health .btn { margin: 0; flex: none; }
@@ -23,13 +32,13 @@
   .hvm-health pre:empty { display: none; }
   .hvm-health .hh-hint { margin-top: 4px; font-size: 11px; color: #b26a00; white-space: normal; }
   .hvm-health .hh-banner { position: static; display: block; width: auto; height: auto; padding: 10px 12px; border-radius: 3px; font-size: 14px; font-weight: 600; text-align: left; margin: 8px 0; border-left: 5px solid #888; background: none; }
-  .hvm-health .hh-ov-CRITICAL { border-color: #c62828; color: #c62828; }
+  .hvm-health .hh-ov-CRITICAL { border-color: #e53935; color: #e53935; }
   .hvm-health .hh-ov-DEGRADED { border-color: #e65100; color: #e65100; }
   .hvm-health .hh-ov-WARNING { border-color: #b26a00; color: #b26a00; }
-  .hvm-health .hh-ov-HEALTHY { border-color: #2e7d32; color: #2e7d32; }
-  .hvm-health .hh-emergency { border: 2px solid #c62828; padding: 10px 12px; margin-bottom: 8px; }
+  .hvm-health .hh-ov-HEALTHY { border-color: #388e3c; color: #388e3c; }
+  .hvm-health .hh-emergency { border: 2px solid #e53935; padding: 10px 12px; margin-bottom: 8px; }
   .hvm-health .hh-emergency input[type=text] { padding: 3px 6px; }
-  .hvm-health .hh-tier { font-size: 10px; opacity: .8; display: block; margin-top: 2px; }
+  .hvm-health .hh-tier { font-size: 10px; opacity: .8; display: block; margin-top: 2px; overflow-wrap: normal; }
   /* the findings reference: a modal dialog takes the tab's text colour from here, and its background from the page when it opens */
   .hvm-health .hh-id { display: inline; margin: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; font-weight: 600; white-space: nowrap; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
   .hvm-health .hh-id:hover { text-decoration-style: solid; }
@@ -53,8 +62,8 @@
   .hvm-health .hh-ref-name { font-weight: 600; }
   .hvm-health .hh-ref-field { margin: 3px 0; }
   .hvm-health .hh-ref-label { font-weight: 600; opacity: .8; }
-  .hvm-health .hh-st-PASS { color: #2e7d32; } .hvm-health .hh-st-FAIL { color: #c62828; }
-  .hvm-health .hh-st-WARN { color: #b26a00; } .hvm-health .hh-st-NA { opacity: .75; } .hvm-health .hh-st-NOT_CHECKED { color: #546e7a; font-style: italic; }
+  .hvm-health .hh-st-PASS { color: #388e3c; } .hvm-health .hh-st-FAIL { color: #e53935; }
+  .hvm-health .hh-st-WARN { color: #b26a00; } .hvm-health .hh-st-NA { opacity: .75; } .hvm-health .hh-st-NOT_CHECKED { color: #6b8794; font-style: italic; }
   /* the tab is narrower than the window, so columns give up their one-line rule well before the window gets small */
   @media (max-width: 1280px) {
     .hvm-health th, .hvm-health td > .hh-nw, .hvm-health td.hh-nw { white-space: normal; }
@@ -68,13 +77,20 @@
       <button type="button" class="btn btn-default btn-sm" data-act="help" aria-haspopup="dialog">Help</button>
       <span class="hh-muted">Read-only. Compares every host with the others and with this layout's standards.</span></div>
     <div class="ph-body hh-muted">Loading… (if this never changes, the tab script was blocked: check the browser console)</div></section>
+  <section data-section="window"><div class="ph-body"></div></section>
   <section data-section="emergency"><div class="ph-body"></div></section>
   <section data-section="findings"><h3>Findings</h3><div class="hh-row" data-field="filter"></div><div class="ph-body"></div></section>
+  <section data-section="busiest"><div class="ph-body"></div></section>
   <section data-section="time"><h3>Time</h3><div class="ph-body"></div></section>
   <section data-section="hosts"><h3>Hosts</h3><div class="ph-body"></div></section>
   <section data-section="standards"><h3>Standards in force</h3>
     <div class="hh-row"><span class="hh-muted">Override any of these in the plugin's Site standards setting. "hpe" is from HPE documentation, "upstream" from corosync, DLM and GFS2, "morpheus" is how the layout deploys, "plugin" is this plugin's judgement, "site" is yours.</span></div>
     <div class="ph-body"></div></section>
+  <section data-section="capacity"><h3>Capacity forecast and availability</h3>
+    <div class="ph-body"></div>
+    <div class="hh-row"><button type="button" class="btn btn-default btn-sm" data-act="availability">Show availability</button>
+      <span class="hh-muted">Freeze time, stalls and unplanned VM stops by month, with a CSV for each tenant to hand to that customer.</span></div>
+    <div data-field="availability"></div></section>
   <section data-section="report"><h3>Report</h3>
     <div class="hh-row"><button type="button" class="btn btn-default btn-sm" data-act="report">Open report</button>
       <span class="hh-muted">Read-only: current findings and their history, to print or export. It names no tenants, VMs or networks.</span></div>

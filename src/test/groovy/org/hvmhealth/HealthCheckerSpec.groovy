@@ -772,19 +772,19 @@ class HealthCheckerSpec extends Specification {
         }).find { it.id == 'STO-02' }
     }
 
-    def 'only endless queueing is the finding: multipathd says, not the dm features line'() {
+    def 'the no_path_retry window is reported in seconds, and the N-sec and off-on-finite misreads are fixed'() {
         when:
         HealthChecker.Result r = queueing("MP_QUEUE=360014059aaaaaaaaaaaaaaaaaaaaaaaa|${value}".toString())
 
-        then:
+        then: 'the 1.3 fixture has a 60 s token, polling defaults to 5, and its LIO-ORG vendor is unknown so there is no vendor note'
         r.status == status
         r.observed == observed
 
         where:
         value    | status      | observed
-        '12 chk' | Status.PASS | 'finite retry: 12 chk'
-        '30 sec' | Status.PASS | 'finite retry: 30 sec'
-        'off'    | Status.PASS | 'queueing off'
+        '12 chk' | Status.PASS | 'no_path_retry 12, about 61 s at polling 5'
+        '30 sec' | Status.WARN | 'no paths on this map right now: 30 s left before I/O fails'
+        'off'    | Status.WARN | 'no_path_retry off: fails I/O at once, a 0 s window'
         'on'     | Status.WARN | 'queueing on, with no limit'
     }
 

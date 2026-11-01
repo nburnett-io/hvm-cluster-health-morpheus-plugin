@@ -6,6 +6,8 @@ import com.morpheusdata.model.OptionType
 import com.morpheusdata.model.Permission
 import com.morpheusdata.views.HandlebarsRenderer
 import groovy.json.JsonSlurper
+import org.hvmhealth.morpheus.ChangeWindows
+import org.hvmhealth.morpheus.FreezeWatch
 import org.hvmhealth.morpheus.HealthAnalyticsProvider
 import org.hvmhealth.morpheus.HealthController
 import org.hvmhealth.morpheus.HealthMonitor
@@ -62,9 +64,27 @@ class ClusterHealthPlugin extends Plugin {
                 new OptionType(name: 'Site standards', code: 'hvm-health.siteStandards', fieldName: 'siteStandards',
                         fieldLabel: 'Site standards', inputType: OptionType.InputType.TEXTAREA, displayOrder: 40,
                         helpText: 'JSON overriding the built-in standards, for all layouts or per layout. Example: {"gfs2WarnPct": 75, "profiles": {"2.0": {"corosyncToken": 30000}}, "disabledChecks": ["PKG-01"]}. The tab lists every key and where each value came from.'),
+                new OptionType(name: 'Shared risk groups', code: 'hvm-health.sharedRisk', fieldName: 'sharedRisk',
+                        fieldLabel: 'Shared risk groups', inputType: OptionType.InputType.TEXTAREA, displayOrder: 45,
+                        helpText: 'JSON naming what clusters share that the plugin cannot see, by group: {"array-a": [12, "cluster-b"], "rack-5": [12, 30]}. A number is always a cluster id. The same finding appearing on two clusters of a group within 10 minutes shows as a possible shared cause on the all-clusters page. iSCSI portals and time servers are found by themselves.'),
                 new OptionType(name: 'Operator tenants', code: 'hvm-health.operatorTenants', fieldName: 'operatorTenants',
                         fieldLabel: 'Operator tenants', inputType: OptionType.InputType.TEXT, displayOrder: 50,
                         helpText: 'Ids of tenants (comma separated) that may see every cluster, besides the master tenant and each cluster\'s owner. List only tenants that run infrastructure, never customers: findings name hosts, storage and other tenants\' VMs.'),
+                new OptionType(name: 'Status URL port', code: 'hvm-health.statusPort', fieldName: 'statusPort',
+                        fieldLabel: 'Status URL port', inputType: OptionType.InputType.TEXT, displayOrder: 60,
+                        helpText: 'A port for plain HTTP with no login, so a URL monitor or a Morpheus Web Check can read /alive, /status and /cluster/<id>. It says only OK, WARNING, CRITICAL or STALE and counts, nothing about any host or tenant. Empty is off. Changing it takes effect within a minute. Above 1024, as the appliance does not run as root. See docs/ALERTING.md.'),
+                new OptionType(name: 'Clusters checked at once', code: 'hvm-health.checkConcurrency', fieldName: 'checkConcurrency',
+                        fieldLabel: 'Clusters checked at once', inputType: OptionType.InputType.TEXT, defaultValue: HealthMonitor.DEFAULT_CHECK_CONCURRENCY.toString(), displayOrder: 70,
+                        helpText: 'Each check calls every host in its cluster at once, so this limits the load on the appliance. The default suits about 200 clusters at the default quick check interval. If PRB-04 warns that checks are falling behind, raise this or lengthen the interval.'),
+                new OptionType(name: 'Freeze watch (seconds)', code: 'hvm-health.freezeWatchSeconds', fieldName: 'freezeWatchSeconds',
+                        fieldLabel: 'Freeze watch (seconds)', inputType: OptionType.InputType.TEXT, defaultValue: FreezeWatch.DEFAULT_SECONDS.toString(), displayOrder: 80,
+                        helpText: 'Reads one host in each GFS2 cluster this often, between quick checks, so a freeze is found in about this time. It reads DLM and quorum only. 0 turns it off, as does turning automatic checks off.'),
+                new OptionType(name: 'Freeze watch reads a minute', code: 'hvm-health.maxWatchPerMinute', fieldName: 'maxWatchPerMinute',
+                        fieldLabel: 'Freeze watch reads a minute', inputType: OptionType.InputType.TEXT, defaultValue: FreezeWatch.DEFAULT_BUDGET.toString(), displayOrder: 90,
+                        helpText: 'The most reads the freeze watch makes in a minute, across all clusters. With more clusters than this allows, the interval stretches rather than the load growing, and the all-clusters page and each cluster\'s tab say what the real interval is.'),
+                new OptionType(name: 'Longest change window (hours)', code: 'hvm-health.maxWindowHours', fieldName: 'maxWindowHours',
+                        fieldLabel: 'Longest change window (hours)', inputType: OptionType.InputType.TEXT, defaultValue: '24', displayOrder: 100,
+                        helpText: 'A change window holds a cluster\'s paging during planned work and ends by itself. This is the longest one can be asked for. Freezes, withdrawn filesystems and isolation failures are never held.'),
         ]
 
         registerProvider(new HealthTabProvider(this, morpheus))
@@ -73,11 +93,13 @@ class ClusterHealthPlugin extends Plugin {
         registerProvider(controller)
         controllers.add(controller)
         HealthMonitor.start(morpheus, this)
+        ChangeWindows.start(morpheus)
     }
 
     @Override
     void onDestroy() {
         HealthMonitor.stop()
+        ChangeWindows.stop()
     }
 
     static Map readSettings(MorpheusContext morpheus, Plugin plugin) {

@@ -69,8 +69,15 @@ class Fixes {
             case 'rejoin':
                 return new Fix(key, 'Start corosync and dlm so this host rejoins the cluster', Tier.MAINTENANCE, HEADER + REJOIN)
             case 'multipath-reconfigure':
-                return new Fix(key, 'Rescan iSCSI sessions and reload multipath', Tier.MAINTENANCE, HEADER +
-                        'iscsiadm -m session --rescan >/dev/null\nmultipathd reconfigure\nsleep 5\nmultipath -ll | grep -cE "active ready" | sed "s/^/healthy paths: /"\n')
+                // rescan by transport: iSCSI where there are sessions, else a SCSI rescan of each Fibre Channel host. Never an iSCSI rescan on an FC host, where iscsiadm would error with no sessions.
+                return new Fix(key, 'Rescan storage paths and reload multipath', Tier.MAINTENANCE, HEADER +
+                        'if iscsiadm -m session >/dev/null 2>&1; then iscsiadm -m session --rescan >/dev/null; fi\n' +
+                        'for h in /sys/class/fc_host/host*; do\n' +
+                        '  [ -e "$h" ] || continue\n' +
+                        '  s="/sys/class/scsi_host/$(basename "$h")/scan"\n' +
+                        '  if [ -w "$s" ]; then echo "- - -" > "$s"; fi\n' +
+                        'done\n' +
+                        'multipathd reconfigure\nsleep 5\nmultipath -ll | grep -cE "active ready" | sed "s/^/healthy paths: /"\n')
             default:
                 throw new IllegalArgumentException("Unknown fix ${key}")
         }

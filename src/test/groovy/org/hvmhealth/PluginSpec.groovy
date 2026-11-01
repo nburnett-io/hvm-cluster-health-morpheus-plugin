@@ -68,6 +68,32 @@ class PluginSpec extends Specification {
         plugin.settings.find { it.fieldName == 'autoFixClusters' }.inputType == OptionType.InputType.TEXT
     }
 
+    def 'the status URL is off on a new install, and the scale settings have the defaults the code uses'() {
+        given:
+        Plugin plugin = new ClusterHealthPlugin()
+        Plugin.getDeclaredMethod('setMorpheus', MorpheusContext).with { accessible = true; invoke(plugin, Mock(MorpheusContext)) }
+
+        when:
+        plugin.initialize()
+        Map<String, OptionType> s = plugin.settings.collectEntries { [(it.fieldName): it] }
+
+        then:
+        !s.statusPort.defaultValue
+        s.checkConcurrency.defaultValue == HealthMonitor.DEFAULT_CHECK_CONCURRENCY.toString()
+        s.freezeWatchSeconds.defaultValue == '60'
+        s.maxWatchPerMinute.defaultValue == '120'
+        [s.statusPort, s.checkConcurrency, s.freezeWatchSeconds, s.maxWatchPerMinute]*.inputType.every { it == OptionType.InputType.TEXT }
+    }
+
+    def 'the probe says whether dlm_tool answered, in the section the freeze watch and the checks read'() {
+        given:
+        String probe = HealthContext.getResourceAsStream('/scripts/health-probe.sh').getText('UTF-8')
+
+        expect:
+        probe.indexOf('sec dlm_ls') < probe.indexOf('echo "DLM_RC=$DLM_RC"')
+        probe.indexOf('echo "DLM_RC=$DLM_RC"') < probe.indexOf('sec dlm_status')
+    }
+
     def 'the probe reads what the checks need from a 1.3 host, without touching anything'() {
         given:
         String probe = HealthContext.getResourceAsStream('/scripts/health-probe.sh').getText('UTF-8')
@@ -191,6 +217,13 @@ class PluginSpec extends Specification {
         hasProperty(com.morpheusdata.model.ApplianceInstance, 'applianceUrl')
         hasMethod(MorpheusContext.getMethod('getAsync').returnType.getMethod('getLoadBalancer').returnType, 'getApplianceUrl', 0)
         hasMethod(com.morpheusdata.core.data.DataQuery, 'withFilters', 1)
+    }
+
+    def 'Morpheus members the forecasts, figures and shared causes use exist'() {
+        expect:
+        hasProperty(ComputeServer, 'maxCores')
+        ['keyValue', 'value'].every { hasProperty(com.morpheusdata.model.OperationData, it) }
+        ['eventKey', 'resourceName', 'startDate', 'acknowledged'].every { hasProperty(com.morpheusdata.model.OperationNotification, it) }
     }
 
     /** One cluster on a mocked Morpheus. */
@@ -340,6 +373,28 @@ class PluginSpec extends Specification {
         line.startsWith('[ "$FS_SAFE" = 1 ] && ')
     }
 
+    def 'hvmcli runs only behind every guard, and smartctl reads only what the scan calls megaraid, up to 24'() {
+        given:
+        String probe = HealthContext.getResourceAsStream('/scripts/health-probe.sh').getText('UTF-8')
+        List<String> lines = probe.readLines()
+        int full = lines.findLastIndexOf { it == 'if [ "$MODE" = full ]; then' }
+        int health = lines.findIndexOf { it.contains('hvmcli health check --json') && !it.trim().startsWith('#') }
+        int guard = lines.findIndexOf { it.contains('[ "$FS_SAFE" != 1 ]') && it.contains('! dlm_calm') }
+        List<String> smartctls = lines.findAll { it =~ /(^|[ ;{])smartctl / && !it.trim().startsWith('#') }
+
+        expect:
+        full < guard && guard < health
+        lines[health].contains('bounded 30 hvmcli')
+        probe.findAll(/hvmcli [a-z]+/).findAll { !it.startsWith('hvmcli is') } == ['hvmcli health']
+        probe.contains('''$1 ~ /^\\/dev\\/bus\\/[0-9]+$/ && $3 ~ /^megaraid,[0-9]+$/ {print $1, $3}''')
+        probe.contains('[ "$raid_n" -gt 24 ]')
+        !probe.contains('--scan-open')
+        // every smartctl read keeps serial numbers and WWNs on the host, and the scan is the only other call
+        smartctls.every { it.contains('--scan') || it.contains(''''serial|wwn|logical unit id\'''') }
+        smartctls.count { it.contains('-d "$1" "$2"') } == 1
+        !(probe =~ /smartctl[^|\n]*-d scsi/)
+    }
+
     def 'Morpheus members the page and the history use exist'() {
         given:
         Class store = MorpheusServices.getMethod('getOperationData').returnType
@@ -353,6 +408,46 @@ class PluginSpec extends Specification {
         hasMethod(com.morpheusdata.core.providers.AnalyticsProvider, 'loadData', 2)
         hasMethod(com.morpheusdata.core.providers.AnalyticsProvider, 'renderTemplate', 3)
         hasMethod(com.morpheusdata.core.providers.AbstractAnalyticsProvider, 'getRenderer', 0)
+    }
+
+    def 'Morpheus members the alarm layer and change windows use exist'() {
+        expect:
+        hasMethod(com.morpheusdata.core.data.DataQuery, 'withFilter', 3)
+        ['resourceName', 'statusMessage', 'uniqueId', 'active', 'acknowledged', 'acknowledgedByUser', 'startDate'].every { hasProperty(com.morpheusdata.model.OperationNotification, it) }
+        ['keyValue', 'value'].every { hasProperty(com.morpheusdata.model.OperationData, it) }
+        hasProperty(com.morpheusdata.model.User, 'username')
+    }
+
+    def 'change windows, grouped findings and busiest VMs go in as text, with the tab own classes'() {
+        given:
+        String tab = new File('src/assets/javascripts/health-tab.js').getText('UTF-8')
+        String mine = tab.substring(tab.indexOf('function incidentRow'), tab.indexOf('function renderTime'))
+        String hbs = new File('src/main/resources/renderer/hbs/healthTab.hbs').getText('UTF-8')
+
+        expect:
+        ['function renderWindow', 'function renderBusiest', 'window-start', 'window-end'].every { mine.contains(it) }
+        !mine.contains('innerHTML')
+        !mine.contains('insertAdjacentHTML')
+        mine.findAll(/'class': '([^']*)'/) { m, c -> c }.every { c -> c.tokenize().every { it.startsWith('hh-') || it.startsWith('st-') } }
+        ['data-section="window"', 'data-section="busiest"'].every { hbs.contains(it) }
+        ['hh-incident', 'hh-member', 'hh-window'].every { hbs.contains(".hvm-health .${it}") }
+    }
+
+    def 'the longest change window is a setting, with a default and help'() {
+        given:
+        Plugin plugin = new ClusterHealthPlugin()
+        Plugin.getDeclaredMethod('setMorpheus', MorpheusContext).with { accessible = true; invoke(plugin, Mock(MorpheusContext)) }
+
+        when:
+        plugin.initialize()
+        OptionType o = plugin.settings.find { it.fieldName == 'maxWindowHours' }
+
+        then:
+        o.defaultValue == '24'
+        o.helpText
+
+        cleanup:
+        plugin.onDestroy()
     }
 
     def 'the all-clusters page is registered, and the tab links to it instead of holding it'() {

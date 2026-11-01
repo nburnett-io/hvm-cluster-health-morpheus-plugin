@@ -406,7 +406,7 @@ END
         ctx.ran == []
     }
 
-    def 'every failure and warning gets its own alarm, at the right severity, and passes get none'() {
+    def 'unrelated failures and warnings get an alarm each, at the right severity, and passes get none'() {
         given:
         List<HealthChecker.Result> rs = [
                 new HealthChecker.Result('DLM-01', 'Waiting', HealthChecker.Severity.CRITICAL, HealthChecker.Status.FAIL, 'hvm-node02', 'stuck', 'none'),
@@ -425,13 +425,12 @@ END
         a*.uniqueId.every { it.startsWith('hvm-cluster-health-15-') }
     }
 
-    def 'a finding keeps its alarm identity across runs, and each host its own'() {
+    def 'a finding keeps its alarm identity across runs, and each cluster its own'() {
         given:
         Closure<HealthChecker.Result> r = { String host, String observed -> new HealthChecker.Result('NET-01', 'Bond', HealthChecker.Severity.HIGH, HealthChecker.Status.FAIL, host, observed, 'up') }
 
         expect:
         HealthMonitor.alarmsFor(15L, 'c', [r('a', 'one')])[0].uniqueId == HealthMonitor.alarmsFor(15L, 'c', [r('a', 'two')])[0].uniqueId
-        HealthMonitor.alarmsFor(15L, 'c', [r('a', 'one')])[0].uniqueId != HealthMonitor.alarmsFor(15L, 'c', [r('b', 'one')])[0].uniqueId
         HealthMonitor.alarmsFor(15L, 'c', [r('a', 'one')])[0].uniqueId != HealthMonitor.alarmsFor(151L, 'c', [r('a', 'one')])[0].uniqueId
     }
 

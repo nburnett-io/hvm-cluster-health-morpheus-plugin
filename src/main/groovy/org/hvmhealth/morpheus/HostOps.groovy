@@ -140,7 +140,7 @@ class HostOps {
                     ? "Stopped: something still has GFS2 open on ${host} (see above). Nothing was changed, and Morpheus was not asked."
                     : (un.exit == 4
                     ? "Stopped: ${host} refused to unmount GFS2 (see above), so Morpheus was not asked to remove it. That datastore stays mounted, with its pool started again. Find what holds it, then try again."
-                    : "Stopped: ${host} did not finish unmounting GFS2 (exit ${un.exit}), so Morpheus was not asked to remove it. Reboot it while it is in maintenance mode, which clears a hung unmount, then try again."))
+                    : "Stopped: ${host} did not finish unmounting GFS2 within the plugin's limit (exit ${un.exit}), so Morpheus was not asked to remove it. Do not rush a reboot: a GFS2 unmount can hang while a lock is cleared and, from kernel source, the wait is bounded at about 600 s and then completes and leaves cleanly (not yet confirmed on a live host), so a reboot mid-unmount is the unclean departure that freezes the survivors. Wait out Morpheus's own timeout and re-check; reboot only once it is certainly out of use, then try again."))
         }
         progress << "${host}: Morpheus is removing it".toString()
         ServiceResponse r

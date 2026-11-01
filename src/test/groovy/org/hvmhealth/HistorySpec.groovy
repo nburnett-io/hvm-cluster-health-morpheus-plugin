@@ -230,7 +230,7 @@ class HistorySpec extends Specification {
         !json.contains('no traffic')
     }
 
-    def 'a VM\'s name is not stored from NET-12 or NET-13, and each VM stays its own finding'() {
+    def 'a VM\'s name is not stored from NET-12, NET-13 or SEC-05, and each VM stays its own finding'() {
         given:
         Map doc = FindingHistory.empty(T0)
         Closure<HealthChecker.Result> port = { String vm -> new HealthChecker.Result(id, "${title}: ${vm}".toString(), Severity.HIGH, Status.WARN, 'hvm-node01', "observed ${vm}", 'x', 'plugin') }
@@ -249,6 +249,7 @@ class HistorySpec extends Specification {
         id       | title
         'NET-12' | 'VM port on the VLAN Morpheus says'
         'NET-13' | 'No unexpected trunk'
+        'SEC-05' | 'Customer VM on a host storage VLAN'
     }
 
     def 'a title with no VM in it, such as a host\'s own row, is left alone'() {
@@ -331,8 +332,8 @@ class HistorySpec extends Specification {
         problems.every { it.firstSeen }
         !v.results.find { it.status == 'PASS' }.firstSeen
         !v.historyError
-        store.rows.size() == 1
-        !store.rows[0].rawData.contains('running VM')
+        store.rows.findAll { it.category == FindingHistory.CATEGORY }.size() == 1
+        !store.rows.any { it.rawData.contains('running VM') }
 
         when: 'the plugin reloads, which empties what is in memory'
         HealthMonitor.LAST.remove(27L)

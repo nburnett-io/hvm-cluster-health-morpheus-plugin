@@ -90,16 +90,24 @@ class HealthChecker {
         }
         layoutChecks(reachable)
         membershipChecks(reachable)
+        agentQuorumChecks(reachable)
         // DLM is read first, so a host that ran out of time can still name a freeze
         dlmChecks(input.hosts.findAll { it.facts?.complete || it.facts?.partial })
         gfs2Checks(reachable)
+        krnChecks(reachable)
         vmChecks(reachable)
         storageChecks(reachable)
+        fibreChannelChecks(reachable)
+        iscsiTransportChecks(reachable)
+        allPathsLostChecks(reachable)
         networkChecks(reachable)
         hostChecks(reachable)
         timeChecks(reachable)
         migrationChecks(reachable)
         capacityChecks()
+        overcommitCheck()
+        forecastChecks()
+        thinLunChecks(reachable)
         haChecks(reachable)
         vlanChecks(reachable)
         storageLatencyChecks(reachable)
@@ -115,10 +123,16 @@ class HealthChecker {
         quorumDeviceChecks(reachable)
         certificateChecks(reachable)
         bootDiskChecks(reachable)
+        hpeCheck(reachable)
         cpuDriftChecks(reachable)
         storageSpaceChecks(reachable)
         vmPortChecks(reachable)
         frameSizeChecks(reachable)
+        hostLoadChecks(reachable)
+        patchExposureChecks(reachable)
+        kernelPostureChecks(reachable)
+        netTimingChecks(reachable)
+        tenantSecurityChecks(reachable)
         out.removeAll { it.id in st.disabledChecks }
         addImpact()
         out.sort { a, b -> rank(a) <=> rank(b) ?: a.id <=> b.id ?: (a.host ?: '') <=> (b.host ?: '') }
@@ -204,7 +218,7 @@ class HealthChecker {
                     long avg = ((s.readMs as long) + (s.writeMs as long)) / ios as long
                     add('STO-06', "Storage latency: ${s.wwid}".toString(), Severity.HIGH, avg >= fail ? Status.FAIL : (avg >= warn ? Status.WARN : Status.PASS), h.name,
                             "${avg} ms average over ${ios} I/Os in 2 s, ${s.inflight} in flight".toString(), "< ${warn} ms".toString(), st.source('storageWarnMs'), null, Tier.NONE,
-                            avg >= warn ? 'Check the other hosts. If they are slow too, look at the array; if only this one is, its paths and NICs.' : null)
+                            avg >= warn ? "Check the other hosts. If they are slow too, look at the array; if only this one is, its paths and NICs.${busiestHint(h)}".toString() : null)
                 }
             }
             h.facts.gfsStatMs.each { String m, Integer ms ->
@@ -236,8 +250,12 @@ class HealthChecker {
             }
             if (f.edac) {
                 long ue = f.edac.sum { it.ue } as long, ce = f.edac.sum { it.ce } as long
-                add('HW-02', 'No memory errors', Severity.HIGH, ue ? Status.FAIL : (ce ? Status.WARN : Status.PASS), h.name, "${ue} uncorrectable, ${ce} correctable".toString(), '0', 'plugin', null, Tier.NONE,
-                        ue || ce ? 'Rising memory errors come before a host crash. An unclean crash freezes every GFS2 datastore until it is acknowledged, so move VMs off and plan a replacement.' : null)
+                boolean clean = !ue && !ce
+                add('HW-02', 'No memory errors', Severity.HIGH, ue ? Status.FAIL : (ce ? Status.WARN : Status.PASS), h.name,
+                        clean ? '0 uncorrectable, 0 correctable reported by EDAC; a firmware-first server may not report corrected errors to Linux, so this is not proof' : "${ue} uncorrectable, ${ce} correctable".toString(),
+                        '0', 'plugin', null, Tier.NONE,
+                        ue || ce ? 'Rising memory errors come before a host crash. An unclean crash freezes every GFS2 datastore until it is acknowledged, so move VMs off and plan a replacement.'
+                                : 'A zero here does not prove the DIMMs are healthy: on HPE firmware-first servers the controller handles memory errors and can hide corrected ones from Linux. Read the management controller or iLO/iDRAC memory health as well.')
             }
             List<Map> temps = f.sensors.findAll { it.type == 'Temperature' && !(it.status in ['ok', 'ns']) }
             if (f.sensors.any { it.type == 'Temperature' }) {
@@ -355,13 +373,32 @@ class HealthChecker {
                         f.confPresent ? null : 'This host has no corosync.conf: it is not a cluster member, so it needs adding back through Morpheus rather than a service start.')
             }
             if (f.active('corosync')) {
-                add('CLU-03', 'Host sees a quorate cluster', Severity.CRITICAL, f.quorate ? Status.PASS : Status.FAIL, h.name, f.quorate ? 'quorate' : 'NOT quorate', 'quorate', 'upstream')
+                // HPE: on layouts 1.3 and 2.0 corosync's Quorate does not decide quorum, and reads No on a healthy two-node (and stretch) cluster.
+                // So on a genuine two-node corosync cluster CLU-03/CLU-04 are informational, and the agent quorum (CLU-14) is the authority. A
+                // degraded cluster of 3+ (a node lost) still means something, and stretch cannot be told apart here, so those keep the corosync check.
+                boolean agentDecides = in_.layout?.version in ['1.3', '2.0']
+                boolean twoNode = agentDecides && (f.expectedVotes == 2 || (f.expectedVotes == null && f.nodelist?.size() == 2))
+                if (twoNode) {
+                    add('CLU-03', 'Host sees a quorate cluster', Severity.CRITICAL, Status.NA, h.name,
+                            f.quorate ? 'corosync quorate; the agent quorum decides (CLU-14)' : 'corosync Quorate: No, expected on a two-node HVM cluster: the agent quorum decides (CLU-14)',
+                            'the agent quorum, not corosync', 'hpe', null, Tier.NONE,
+                            'HPE: on 1.3 and 2.0 the agent quorum, not corosync, decides, and Quorate: No is expected on a two-node cluster. Read CLU-14. Built from HPE docs, not yet confirmed against a real two-node cluster.')
+                } else {
+                    add('CLU-03', 'Host sees a quorate cluster', Severity.CRITICAL, f.quorate ? Status.PASS : Status.FAIL, h.name, f.quorate ? 'quorate' : 'NOT quorate', 'quorate', 'upstream', null, Tier.NONE,
+                            agentDecides && !f.quorate ? 'On 1.3 and 2.0 the agent quorum (CLU-14) is the operational authority, and Quorate: No is expected on two-node and stretch clusters, which are not told apart here: confirm against CLU-14 before acting.' : null)
+                }
                 if (f.totalVotes != null && f.expectedVotes != null) {
                     boolean full = f.totalVotes >= f.expectedVotes
                     boolean margin = f.quorumVotes == null || f.totalVotes > f.quorumVotes
-                    add('CLU-04', 'Quorum margin: a host can fail without losing quorum', Severity.HIGH, full ? Status.PASS : (margin ? Status.WARN : Status.FAIL), h.name,
-                            "${f.totalVotes} of ${f.expectedVotes} votes, quorum ${f.quorumVotes}".toString(), 'all expected votes present', 'upstream', null, Tier.NONE,
-                            full ? null : 'A member is missing: find out which and why before any host work. One more failure at no margin stops every datastore.')
+                    if (twoNode) {
+                        add('CLU-04', 'Quorum margin: a host can fail without losing quorum', Severity.HIGH, Status.NA, h.name,
+                                "${f.totalVotes} of ${f.expectedVotes} votes, quorum ${f.quorumVotes}".toString(), 'the agent quorum and witness, not a corosync vote margin', 'hpe', null, Tier.NONE,
+                                'A two-host HVM cluster has no corosync vote margin by design; the agent quorum and a Distributed Worker witness decide (CLU-14, CLU-12). Built from HPE docs, not yet confirmed against a real two-node cluster.')
+                    } else {
+                        add('CLU-04', 'Quorum margin: a host can fail without losing quorum', Severity.HIGH, full ? Status.PASS : (margin ? Status.WARN : Status.FAIL), h.name,
+                                "${f.totalVotes} of ${f.expectedVotes} votes, quorum ${f.quorumVotes}".toString(), 'all expected votes present', 'upstream', null, Tier.NONE,
+                                full ? null : ('A member is missing: find out which and why before any host work. One more failure at no margin stops every datastore.' + (agentDecides ? ' On 1.3 and 2.0 the agent quorum (CLU-14) is the authority; corosync votes only corroborate.' : '')))
+                    }
                 }
                 if (f.linkFaults) {
                     add('CLU-08', 'Corosync links connected', Severity.HIGH, Status.FAIL, h.name, f.linkFaults.collect { "node ${it.nodeid}: ${it.status}" }.join(', '), 'every peer connected', 'upstream')
@@ -386,6 +423,7 @@ class HealthChecker {
             add('CLU-06', 'corosync.conf identical on every host', Severity.HIGH, sigs.size() == 1 ? Status.PASS : Status.FAIL, null,
                     sigs.size() == 1 ? "config_version ${withConf[0].facts.corosync['totem.config_version']}".toString() : "${sigs.size()} different versions: ${withConf.collect { "${it.name}=v${it.facts.corosync['totem.config_version']}" }.join(', ')}".toString(),
                     'one version', 'upstream')
+            ghostMemberCheck(withConf)
             List<String> keys = withConf*.facts*.corosyncKey.findAll().unique()
             add('CLU-07', 'corosync authkey identical on every host', Severity.CRITICAL, keys.size() <= 1 ? Status.PASS : Status.FAIL, null,
                     keys.size() <= 1 ? 'matches' : "${keys.size()} different keys".toString(), 'one key', 'upstream', null, Tier.NONE,
@@ -405,6 +443,23 @@ class HealthChecker {
         }
         String name = (node.name as String)?.toLowerCase()
         name && (name == h.name?.toLowerCase() || name == h.facts?.hostname?.toLowerCase())
+    }
+
+    /**
+     * CLU-16, sharpening CLU-06: a host whose corosync.conf config_version is below the others rejoined with a stale file. Built from corosync
+     * source and a Proxmox reproduction (PR #828), not seen on HVM: such a node can leave a ghost CPG member that no membership change removes,
+     * and nothing clears it until corosync restarts across the cluster. Compared from the file every host already reports, so it needs no new read.
+     */
+    private void ghostMemberCheck(List<Host> hs) {
+        List<Map> vers = hs.collect { Host h -> [name: h.name, v: (h.facts.corosync['totem.config_version'] ==~ /\d+/ ? h.facts.corosync['totem.config_version'] as Integer : null)] }.findAll { it.v != null }
+        if (vers.size() < 2) {
+            return
+        }
+        int top = vers*.v.max() as int
+        List<String> stale = vers.findAll { (it.v as Integer) < top }.collect { "${it.name}=v${it.v}".toString() }
+        add('CLU-16', 'No host rejoined corosync with a stale config_version', Severity.HIGH, stale ? Status.WARN : Status.PASS, null,
+                stale ? "${stale.join(', ')}, the rest at v${top}".toString() : "every host at config_version ${top}".toString(), 'all at the newest config_version', 'upstream', null, Tier.NONE,
+                stale ? 'A host that was down during a host add or remove returns with an older corosync config_version, because Morpheus reloads only the hosts that were up. Built from corosync source and a Proxmox reproduction, not seen on HVM: the stale node can rejoin and leave a ghost CPG member that no membership change removes, and on that reproduction the cluster filesystem hung on every node until corosync was restarted everywhere. Do not start or restart it until its corosync.conf matches the others, which CLU-06 also flags; the plugin never restarts corosync. See docs/HPE-QUESTIONS.md.' : null)
     }
 
     private void totemChecks(List<Host> hs) {
@@ -428,9 +483,116 @@ class HealthChecker {
         }
     }
 
+    // ------------------------------------------------------------------ agent quorum (HPE's authority on 1.3 and 2.0)
+
+    /**
+     * HPE's agent quorum (https://127.0.0.1:7443/quorum) is the operational authority on layouts 1.3 and 2.0; corosync is only membership.
+     * CLU-14 reads that endpoint; CLU-15 checks that the agent, corosync and Morpheus list the same members, which is the real split signal.
+     * Both are built from HPE documentation, the payload's shape is only partly known, so anything unexpected reads NOT CHECKED, never PASS,
+     * and neither has yet been confirmed against a real two-host or stretch cluster. Neither changes a host, so there is no fix.
+     */
+    private void agentQuorumChecks(List<Host> hs) {
+        if (in_.layout?.hciCeph) {
+            return
+        }
+        // only when the probe gathered the section at all: an older probe did not, and a result invented from nothing would be worse than none
+        if (!hs.any { it.facts.sections.containsKey('agent_quorum') }) {
+            return
+        }
+        String want = 'quorum achieved, every node reachable'
+        hs.each { Host h ->
+            HostFacts f = h.facts
+            if (!f.sections.containsKey('agent_quorum')) {
+                return
+            }
+            Map q = f.agentQuorum
+            if (q == null || q.achieved == null) {
+                add('CLU-14', 'Agent quorum achieved', Severity.CRITICAL, Status.NOT_CHECKED, h.name,
+                        'the agent quorum endpoint (https://127.0.0.1:7443/quorum) gave nothing to read, or not the documented JSON', want, 'hpe', null, Tier.NONE,
+                        'HPE\'s agent quorum is the authority on 1.3 and 2.0. Check the host agent is running and answering on 7443. Built from HPE docs: the payload shape is only partly known, so anything unexpected is read as not checked.')
+                return
+            }
+            boolean down = q.achieved == false || q.fenced == true
+            boolean unreachable = q.reachable != null && q.total != null && (q.reachable as int) < (q.total as int)
+            Status s = down ? Status.FAIL : ((q.waitFencing == true || unreachable) ? Status.WARN : Status.PASS)
+            List<String> obs = [q.achieved == false ? 'quorum NOT achieved' : 'quorum achieved']
+            if (q.fenced == true) { obs << 'this host fenced' }
+            if (q.waitFencing == true) { obs << 'waiting to fence a node' }
+            if (q.reachable != null && q.total != null) { obs << "${q.reachable} of ${q.total} nodes reachable".toString() }
+            if (q.corosyncActive == false) { obs << 'corosync not active' }
+            if (q.dlmActive == false) { obs << 'dlm not active' }
+            add('CLU-14', 'Agent quorum achieved', Severity.CRITICAL, s, h.name, obs.join(', '), want, 'hpe', null, Tier.NONE,
+                    down ? 'HPE\'s agent quorum is the authority on 1.3 and 2.0: its loss leads a host to self-fence, stopping DLM and corosync. Corosync Quorate (CLU-03) does not decide this. DLM-01 and DLM-02 show a fence wait and its timing. Built from HPE docs, not yet confirmed against a real two-host or stretch cluster.'
+                            : ((q.waitFencing == true || unreachable) ? 'A node is being fenced or is unreachable to the agent. Read DLM-01 for a fence wait and its timing, and CLU-15 for a member the agent has dropped. Built from HPE docs, not yet confirmed against a real two-host or stretch cluster.' : null))
+        }
+        threeWayAgreement(hs)
+    }
+
+    /**
+     * CLU-15: the members the agent lists (/quorum and .quorum-nodes), the corosync nodelist and Morpheus's hosts should be the same set.
+     * A corosync member the agent does not list is the precondition suspected behind the production freeze. Read only, no fix: HPE says not to
+     * hand-edit these files. The agent file's format is undocumented, so when its tokens match nothing known this reads NOT CHECKED, not FAIL.
+     */
+    private void threeWayAgreement(List<Host> hs) {
+        hs.each { Host h ->
+            HostFacts f = h.facts
+            if (!f.sections.containsKey('agent_quorum')) {
+                return
+            }
+            String want = 'the same members in the agent, corosync and Morpheus'
+            Set<String> agent = f.agentQuorumNodes as Set<String>
+            if (!agent) {
+                add('CLU-15', 'Agent, corosync and Morpheus list the same members', Severity.HIGH, Status.NOT_CHECKED, h.name,
+                        'the agent listed no member data to compare', want, 'hpe', null, Tier.NONE,
+                        'Compares /opt/morpheus-node/.quorum-nodes and the /quorum nodes with the corosync nodelist and Morpheus. Built from HPE docs; the file format is undocumented, and this has not been confirmed against a real host.')
+                return
+            }
+            // only judge once the agent's identifiers line up with something known, or its scheme is one this plugin cannot read
+            boolean recognised = f.nodelist.any { inAgent(it, null, agent) } || in_.hosts.any { inAgent(null, it, agent) }
+            if (!recognised) {
+                add('CLU-15', 'Agent, corosync and Morpheus list the same members', Severity.HIGH, Status.NOT_CHECKED, h.name,
+                        "could not match the agent's member list (${agent.size()} entr${agent.size() == 1 ? 'y' : 'ies'}) to any known host", want, 'hpe', null, Tier.NONE,
+                        'The agent lists members by identifiers this plugin could not line up with corosync or Morpheus, so it is not judged; the file format is undocumented. Built from HPE docs, not yet confirmed against a real host.')
+                return
+            }
+            List<String> missing = f.nodelist.findAll { !inAgent(it, null, agent) }.collect { (it.name ?: it.addr ?: "node ${it.nodeid}") as String }.sort()
+            add('CLU-15', 'Agent, corosync and Morpheus list the same members', Severity.HIGH, missing ? Status.FAIL : Status.PASS, h.name,
+                    missing ? "in corosync but not the agent's quorum-node list: ${missing.join(', ')}".toString() : "${f.nodelist.size()} corosync node(s), all in the agent's list".toString(),
+                    want, 'hpe', null, Tier.NONE,
+                    missing ? 'A node corosync counts but the agent does not is the precondition suspected behind the production freeze: if that node fails, DLM waits for a fence the agent will never issue. Compare with CLU-05. HPE says not to hand-edit corosync or agent quorum files, so there is no fix: remove the node through Morpheus, or add it back cleanly. Built from HPE docs, the file format undocumented and not yet confirmed against a real freeze.' : null)
+        }
+    }
+
+    /** Whether a corosync node or a Morpheus host is represented in the agent's lower-cased token set, by name, address or id. */
+    private static boolean inAgent(Map node, Host host, Set<String> agent) {
+        List<String> ids = []
+        if (node != null) {
+            if (node.name) { ids << (node.name as String) }
+            if (node.addr) { ids << (node.addr as String) }
+            if (node.nodeid != null) { ids << node.nodeid.toString() }
+        }
+        if (host != null) {
+            if (host.name) { ids << host.name }
+            if (host.ip) { ids << host.ip }
+            if (host.facts?.hostname) { ids << host.facts.hostname }
+        }
+        ids.any { agent.contains(it.toLowerCase()) }
+    }
+
     // ------------------------------------------------------------------ DLM
 
     private static final int AGENT_ACK_MINUTES = 3
+
+    /** Names the wait state of a stopped lockspace for DLM-03, from dlm_tool ls (ringid, quorum, messages, fsdone). */
+    private static String dlm03Hint(List<Map> stopped) {
+        String s = stopped.collect { it.status as String }.findAll().join(' ')
+        List<String> notes = []
+        if (s.contains('wait ringid')) { notes << 'wait ringid: corosync and the lockspace are out of step, usually a membership change in progress' }
+        if (s.contains('wait quorum')) { notes << 'wait quorum: this does not happen with HVM\'s dlm settings, so dlm.conf differs on this host' }
+        if (s.contains('wait messages')) { notes << 'wait messages: a member never sent its start message, so look at a hung dlm_controld on a peer or a stale (ghost) member' }
+        if (s.contains('wait fsdone')) { notes << 'wait fsdone: GFS2 has not finished, so read the kernel log' }
+        notes ? notes.join('. ') + '.' : 'A lockspace is stopped for recovery. If it does not clear, read dlm_tool ls and the kernel log on this host.'
+    }
 
     private void dlmChecks(List<Host> hs) {
         if (in_.layout?.hciCeph) {
@@ -451,7 +613,7 @@ class HealthChecker {
                 if (!f.frozen) {
                     add('DLM-06', 'dlm_controld is not fencing a departed node', Severity.LOW, Status.WARN, h.name,
                             "still retrying to fence ${name} (node ${w.node}), with every lockspace running".toString(), 'no fence requests', 'upstream', null, Tier.NONE,
-                            'GFS2 I/O is not blocked. Seen for minutes after a host left cleanly. There is nothing to acknowledge unless a lockspace stops.')
+                            'No GFS2 I/O is blocked now, but this is a latent freeze: the retry blocks the next membership change on that lockspace, so the next mount, unmount, new datastore, or host joining or leaving will freeze it until this clears. Do no host work on this cluster until it does. A fence result of 177 means no fence agent is loaded, so no fence was ever attempted, not that one failed. There is nothing to acknowledge unless a lockspace stops, which shows as DLM-01.')
                     return
                 }
                 add('DLM-01', 'Lockspaces waiting for a node to be fenced', Severity.CRITICAL, Status.FAIL, h.name,
@@ -472,11 +634,23 @@ class HealthChecker {
                         "waiting on ${name} (node ${node}), with no fence request showing: all GFS2 I/O on this host is blocked".toString(), 'no fence waits', 'upstream', 'fence-ack:' + node, Tier.EMERGENCY,
                         'Every heartbeat and metadata change on GFS2 is frozen. This kind has been seen when a host was deleted while its GFS2 mount was still starting, and it lasted 27 minutes. Acknowledging by hand was refused by DLM with -125 (no need_fencing); it cleared only after the node had been added back and gone down again, when the agent acknowledged it. Try the acknowledgement once the node is certainly down, and if it does not clear, involve HPE.')
             }
-            // DLM-01 speaks for a stopped lockspace with a fence line or an inferred node; one stopped without either is this finding, or nothing would raise it
-            if (!f.frozen || (!f.fenceWaits && !f.inferredWaits)) {
+            // A lockspace waiting on a node the daemon records as departed but is not fencing: the -125 split state, which a fence_ack cannot clear
+            f.divergedWaits.each { Integer node ->
+                String name = f.nodeNames[node] ?: "node ${node}"
+                add('DLM-07', 'Lockspace stuck in the -125 split state', Severity.CRITICAL, Status.FAIL, h.name,
+                        "waiting to fence ${name} (node ${node}) while dlm_controld records it as departed and is not fencing it: all GFS2 I/O on this host is blocked".toString(), 'no stuck lockspaces', 'upstream', null, Tier.NONE,
+                        'This is the freeze a single hand-run acknowledgement cannot clear: dlm_tool fence_ack is refused with -125 (no need_fencing), because the daemon has no fence pending for this node while the lockspace still waits on it. Read from dlm source and seen once in production for 27 minutes, not reproduced. The way out is a clean rejoin of the node: reboot it and start corosync and dlm with GFS2 left unmounted, and when its protocol is accepted the wait clears with no acknowledgement. Do not acknowledge in a loop, and never automatically. Involve HPE. 2.0 (dlm 4.3.0) behaviour here is unconfirmed.')
+            }
+            // DLM-01/DLM-07 speak for a stopped lockspace with a fence line, an inferred node or a diverged node; one stopped without any is this finding, or nothing would raise it
+            if (!f.frozen || (!f.fenceWaits && !f.inferredWaits && !f.divergedWaits)) {
                 List<Map> stopped = f.lockspaces.findAll { (it.flags as String)?.contains('kern_stop') || it.status }
-                add('DLM-03', 'DLM lockspaces running', Severity.CRITICAL, stopped ? Status.FAIL : Status.PASS, h.name,
-                        stopped ? stopped.collect { "${it.name}: ${it.status ?: it.flags}" }.join(', ') : "${f.lockspaces.size()} lockspace(s) running".toString(), 'running', 'upstream')
+                List<String> blocked = f.gfsBlock.findAll { String k, Integer v -> v == 1 }.keySet().sort() as List<String>
+                Status s03 = stopped ? Status.FAIL : (blocked ? Status.WARN : Status.PASS)
+                add('DLM-03', 'DLM lockspaces running', Severity.CRITICAL, s03, h.name,
+                        stopped ? (stopped.collect { "${it.name}: ${it.status ?: it.flags}" }.join(', ') + (blocked ? "; locking blocked on ${blocked.join(', ')}".toString() : ''))
+                                : (blocked ? "locking blocked on ${blocked.join(', ')} (lock_module/block=1), with no stopped lockspace in dlm_tool ls".toString() : "${f.lockspaces.size()} lockspace(s) running".toString()),
+                        'running', 'upstream', null, Tier.NONE,
+                        stopped ? dlm03Hint(stopped) : (blocked ? 'DFL_BLOCK_LOCKS is set: GFS2 locking is held here. Normal recovery sets it for a moment, so confirm it persists on the next check; if it stays set with no fence line, a lockspace is stopped in a way dlm_tool ls does not show.' : null))
             }
         }
         List<Host> withDlm = hs.findAll { it.facts.lockspaces }
@@ -488,6 +662,49 @@ class HealthChecker {
                     add('DLM-05', 'Hosts agree on lockspace members', Severity.HIGH, Status.FAIL, null, "${ls}: ${ms.unique(false).join(' vs ')}".toString(), 'same members', 'upstream')
                 }
             }
+        }
+    }
+
+    // ------------------------------------------------------------------ kernel freeze fixes
+
+    /** Whether a running kernel ("6.8.0-139-generic") is at least a minimum ("6.8.0-100"); null when either will not parse. Compares major.minor.patch-abi. */
+    static Boolean kernelAtLeast(String running, String min) {
+        List<Integer> a = kernelRank(running), b = kernelRank(min)
+        if (a == null || b == null) {
+            return null
+        }
+        for (int i = 0; i < 4; i++) {
+            if (a[i] != b[i]) {
+                return a[i] > b[i]
+            }
+        }
+        true
+    }
+
+    private static List<Integer> kernelRank(String v) {
+        def m = (v ?: '') =~ /^(\d+)\.(\d+)\.(\d+)(?:[.-](\d+))?/
+        m.find() ? [m.group(1) as Integer, m.group(2) as Integer, m.group(3) as Integer, (m.group(4) ?: '0') as Integer] : null
+    }
+
+    private void krnChecks(List<Host> hs) {
+        if (in_.layout?.hciCeph) {
+            return
+        }
+        String min = st.val('minKernel') as String
+        hs.each { Host h ->
+            HostFacts f = h.facts
+            // KRN-04: the running kernel against a site-set floor that carries the DLM/GFS2 freeze fixes. Runs only where a floor is set for this layout
+            if (min) {
+                Boolean ok = kernelAtLeast(f.kernel, min)
+                add('KRN-04', 'Kernel carries the DLM and GFS2 freeze fixes', Severity.MEDIUM, ok == null ? Status.NOT_CHECKED : (ok ? Status.PASS : Status.WARN), h.name,
+                        ok == null ? "cannot read a version from kernel '${f.kernel ?: 'unknown'}' or the floor '${min}'".toString() : (f.kernel ?: 'unknown'), ">= ${min}".toString(), st.source('minKernel'), null, Tier.NONE,
+                        ok == false ? 'This kernel is below the site floor minKernel, so it is missing fixes that matter to GFS2/DLM recovery. Even at or above the floor, Ubuntu\'s 6.8 kernels still lack the request-cancel (a431d49243a0), evict (e9e38ed7250f) and QUECVT (b6900ce15191) fixes that 7.0 carries, so raise a backport with HPE. The floor and these facts are read from the kernel changelog and source, not verified against HVM OS kernel naming: set minKernel per layout to match what HPE ships.' : null)
+            }
+            // KRN-05: HPE's documented -22 lock-conversion defect, from the kernel log. Only a host reboot onto a fixed kernel and a VM restart clears the guest impact
+            boolean sinceBoot = f.dlmConvErrors && !(f.dlmConvErrorAt && f.boot && f.dlmConvErrorAt < f.boot)
+            add('KRN-05', 'No DLM lock-conversion failures after recovery', sinceBoot ? Severity.HIGH : Severity.MEDIUM, f.dlmConvErrors == null ? Status.NOT_CHECKED : (sinceBoot ? Status.FAIL : (f.dlmConvErrors ? Status.WARN : Status.PASS)), h.name,
+                    f.dlmConvErrors == null ? 'cannot tell: the kernel log could not be read' : (f.dlmConvErrors ? "${f.dlmConvErrors} in the kernel log over 7 days, last: ${f.dlmConvErrorLast}".toString() : 'none in 7 days'), 'none', 'hpe', null, Tier.NONE,
+                    f.dlmConvErrors ? 'After a DLM recovery, downward lock conversions are rejected with EINVAL (-22) and GFS2 returns EIO to the guests, so VMs on this host can see I/O errors, read-only filesystems or a shut-down guest while storage looks healthy. A guest reboot does not clear it; HPE\'s procedure is to shut down the affected VMs, put the host in maintenance mode and reboot it. Present on Ubuntu 6.8 (not backported) and fixed on 7.0. From HPE\'s troubleshooting note, confirmed in kernel source; not yet seen on a host here. It clears 7 days after the last line.' : null)
         }
     }
 
@@ -524,7 +741,7 @@ class HealthChecker {
             }
             f.journals.each { String dev, Integer n ->
                 add('GFS-06', 'GFS2 journals cover every host', Severity.MEDIUM, n >= in_.hosts.size() ? Status.PASS : Status.WARN, h.name, "${n} journal(s) on ${dev}".toString(),
-                        ">= ${in_.hosts.size()} (hosts)".toString(), 'upstream', null, Tier.NONE, n >= in_.hosts.size() ? null : 'A host beyond the journal count cannot mount this filesystem.')
+                        ">= ${in_.hosts.size()} (hosts)".toString(), 'upstream', null, Tier.NONE, n >= in_.hosts.size() ? null : 'Morpheus runs gfs2_jadd itself when it adds a host, so too few journals usually means that add-host step did not finish, rather than something you add by hand. A host beyond the journal count cannot mount this filesystem. Older datastores may carry fewer than the 32 a current mkfs makes.')
             }
             add('GFS-05', 'No hung kernel tasks', Severity.HIGH, f.hung1h >= st.intVal('hungTasksWarn') ? Status.WARN : Status.PASS, h.name,
                     "${f.hung1h} report(s) in the last hour; ${f.dCount} task(s) in D state now, oldest ${f.dOldest ?: 0} s".toString(), 'none', st.source('hungTasksWarn'))
@@ -639,17 +856,34 @@ class HealthChecker {
             if (st.val('mpio')) {
                 f.maps.each { Map m ->
                     List<Map> ps = m.paths as List<Map>
-                    List<Map> bad = ps.findAll { !(it.state == 'active' && it.checker == 'ready') }
-                    boolean failed = bad || !ps   // a map left with no paths at all has lost its storage
+                    // an ALUA standby path reports checker 'ghost' (tur sense 04/0b on Alletra/Nimble and Peer Persistence legs): healthy standby, not a fault
+                    List<Map> standby = ps.findAll { it.checker == 'ghost' }
+                    List<Map> bad = ps.findAll { !(it.state == 'active' && it.checker == 'ready') && it.checker != 'ghost' }
+                    boolean noActive = !ps.any { it.state == 'active' && it.checker == 'ready' }
+                    boolean failed = bad || !ps || noActive   // 0 paths, a genuinely failed path, or no active path at all (only standby left)
                     add('STO-01', "Multipath paths healthy: ${m.wwid}".toString(), Severity.HIGH, failed ? Status.FAIL : (ps.size() < 2 ? Status.WARN : Status.PASS), h.name,
-                            "${ps.size() - bad.size()} of ${ps.size()} healthy".toString(), 'all healthy, at least 2', st.source('mpio'), failed ? 'multipath-reconfigure' : null, failed ? Tier.MAINTENANCE : Tier.NONE)
+                            "${ps.size() - bad.size()} of ${ps.size()} healthy${standby ? " (${standby.size()} standby)" : ''}".toString(), 'all healthy, at least 2', st.source('mpio'), failed ? 'multipath-reconfigure' : null, failed ? Tier.MAINTENANCE : Tier.NONE,
+                            failed && !bad && standby ? 'Only ALUA standby paths remain: every path to the active controller is gone. Check the array and the storage network before one more failure leaves no path at all.' : null)
                     queueCheck(h, m)
+                    expectedPathCheck(h, m)
                 }
             }
-            add('STO-03', 'No iSCSI session errors', Severity.MEDIUM, f.errors24h >= st.intVal('iscsiErrorsWarn') ? Status.WARN : Status.PASS, h.name, "${f.errors24h} in 24 h".toString(), '0', st.source('iscsiErrorsWarn'))
-            if (f.sessions && f.maps) {
-                add('STO-04', 'iSCSI multipath daemons running', Severity.HIGH, f.active('multipathd') && f.active('iscsid') ? Status.PASS : Status.FAIL, h.name,
-                        "multipathd ${f.service('multipathd').active}, iscsid ${f.service('iscsid').active}".toString(), 'active', 'morpheus')
+            storageVendorChecks(h)
+            // on an FC-only host the iSCSI error log says nothing, so it must not read as a clean pass: the FC fabric is STO-09
+            if (f.fcPresent && f.sessions == 0) {
+                add('STO-03', 'No iSCSI session errors', Severity.MEDIUM, Status.NOT_CHECKED, h.name, 'no iSCSI sessions on this host: its storage transport is Fibre Channel', 'n/a on an FC host', st.source('iscsiErrorsWarn'), null, Tier.NONE,
+                        'This host uses Fibre Channel, not iSCSI, so the iSCSI error count says nothing either way. Its fabric health is STO-09.')
+            } else {
+                add('STO-03', 'No iSCSI session errors', Severity.MEDIUM, f.errors24h >= st.intVal('iscsiErrorsWarn') ? Status.WARN : Status.PASS, h.name, "${f.errors24h} in 24 h".toString(), '0', st.source('iscsiErrorsWarn'))
+            }
+            // multipathd looks after FC and iSCSI maps alike, so it is judged wherever maps exist; iscsid only where there are iSCSI sessions
+            if (f.maps) {
+                boolean mpOk = f.active('multipathd')
+                boolean needIscsid = f.sessions > 0
+                boolean iscOk = !needIscsid || f.active('iscsid')
+                add('STO-04', 'Storage path daemons running', Severity.HIGH, mpOk && iscOk ? Status.PASS : Status.FAIL, h.name,
+                        "multipathd ${f.service('multipathd').active ?: '?'}${needIscsid ? ", iscsid ${f.service('iscsid').active ?: '?'}" : ' (no iSCSI sessions, so iscsid is not needed)'}".toString(), 'active', 'morpheus', null, Tier.NONE,
+                        mpOk && iscOk ? null : 'These daemons look after the paths under every GFS2 datastore on this host. Find out why one stopped.')
             }
         }
         // same LUN path count on every host
@@ -663,24 +897,181 @@ class HealthChecker {
     }
 
     /**
-     * What multipathd says happens to I/O with no paths left. Only "on" queues for ever. dm's features line reads
-     * queue_if_no_path for a finite retry too, so on its own it shows queueing today, and nothing about whether it ends.
+     * The no_path_retry window, in seconds, for a map: how long a host holds I/O with all paths gone before it fails it. Vendors
+     * differ by an order of magnitude and none ties a value to GFS2, so this is policy, never a vendor pass or fail: it never
+     * FAILs. It WARNs only when the window is under the corosync token (a brief all-paths event could withdraw GFS2 before a
+     * controller failover completes) or over the site ceiling (noPathRetryPolicy; held writes land after the host is declared
+     * dead). It reports the effective seconds and the vendor's documented value. Two misreads are fixed: "N sec" means the map
+     * has no paths right now (a countdown), and "off" on a map with no active path means its retries are exhausted.
      */
     private void queueCheck(Host h, Map m) {
-        String title = "Map does not queue I/O forever: ${m.wwid}".toString()
-        String expected = 'a finite no_path_retry, or off'
-        String q = m.queueing as String
+        String title = "no_path_retry window is safe: ${m.wwid}".toString()
+        int ceiling = st.intVal('noPathRetryPolicy')
+        String expected = "within the corosync token and the ${ceiling} s site ceiling".toString()
+        String q = (m.queueing as String)?.trim()
         String features = m.features as String
+        String vn = StorageProfiles.nprText(StorageProfiles.forMap(m.vendor as String))
+        String vendorNote = vn ? "; ${vn}".toString() : ''
+        int activeReady = (m.paths as List<Map>).count { it.state == 'active' && it.checker == 'ready' }
+        Integer tokenMs = st.val('corosyncToken') as Integer
+        Integer tokenSec = tokenMs == null ? null : (tokenMs / 1000) as Integer
+        int polling = h.facts.mpPolling ?: 5
         if (q == 'on') {
-            add('STO-02', title, Severity.HIGH, Status.WARN, h.name, 'queueing on, with no limit', expected, 'upstream', null, Tier.NONE,
-                    'Queueing with no paths hangs GFS2 instead of failing the I/O. Set no_path_retry in the multipath configuration, in a maintenance window.')
-        } else if (q && q != '-') {
-            add('STO-02', title, Severity.HIGH, Status.PASS, h.name, q == 'off' ? 'queueing off' : "finite retry: ${q}".toString(), expected, 'upstream')
-        } else if (features?.contains('queue_if_no_path')) {
+            add('STO-02', title, Severity.HIGH, Status.WARN, h.name, "queueing on, with no limit${vendorNote}".toString(), expected, 'upstream', null, Tier.NONE,
+                    'Queueing for ever hangs GFS2 on an all-paths event instead of failing the I/O, so a withdraw never clears by itself. Set a finite no_path_retry in the multipath configuration, in a maintenance window.')
+            return
+        }
+        def chk = q =~ /^(\d+)\s*chk$/
+        def sec = q =~ /^(\d+)\s*sec$/
+        if (chk.find()) {
+            int n = chk.group(1) as int
+            int window = n * polling + 1
+            String why = tokenSec != null && window < tokenSec ? "under the ${tokenSec} s corosync token, so a brief all-paths event could withdraw GFS2 before a controller failover completes" :
+                    (window > ceiling ? "over the ${ceiling} s site ceiling, so held writes could land after this host has been declared dead" : null)
+            add('STO-02', title, Severity.HIGH, why ? Status.WARN : Status.PASS, h.name, "no_path_retry ${n}, about ${window} s at polling ${polling}${vendorNote}".toString(), expected, 'upstream', null, Tier.NONE,
+                    why ? "The ${window} s window is ${why}. This is site policy (noPathRetryPolicy), not a vendor rule: raise it with HPE and the array vendor.".toString() : null)
+            return
+        }
+        if (sec.find()) {
+            add('STO-02', title, Severity.HIGH, Status.WARN, h.name, "no paths on this map right now: ${sec.group(1)} s left before I/O fails${vendorNote}".toString(), expected, 'upstream', null, Tier.NONE,
+                    'multipathd is counting down its retries because the map has no path at this moment. See STO-01 for the paths now, and STO-13 for whether a map has lost every path before.')
+            return
+        }
+        if (q == 'off') {
+            if (activeReady == 0) {
+                add('STO-02', title, Severity.HIGH, Status.WARN, h.name, "no_path_retry off with no active path: I/O is failing now${vendorNote}".toString(), expected, 'upstream', null, Tier.NONE,
+                        'Either no_path_retry is off, or a finite window has run its retries out with no path left. See STO-01.')
+            } else {
+                add('STO-02', title, Severity.HIGH, tokenSec != null ? Status.WARN : Status.PASS, h.name, "no_path_retry off: fails I/O at once, a 0 s window${vendorNote}".toString(), expected, 'upstream', null, Tier.NONE,
+                        tokenSec != null ? "A 0 s window is under the ${tokenSec} s corosync token, so a brief all-paths event withdraws GFS2 at once. This is often the vendor's own value: raise it with HPE before changing it.".toString() : null)
+            }
+            return
+        }
+        // q is '-' (undefined) or absent; dm's features line reads queue_if_no_path for a finite retry too, so it cannot answer alone
+        if (features?.contains('queue_if_no_path')) {
             add('STO-02', title, Severity.HIGH, Status.NOT_CHECKED, h.name, "cannot tell: features '${features}' shows queueing, and multipathd gave no retry limit".toString(), expected, 'upstream', null, Tier.NONE,
                     'Run multipathd show maps format "%n %Q" on the host: "on" queues for ever, a number of checks or seconds does not.')
         } else {
-            add('STO-02', title, Severity.HIGH, Status.PASS, h.name, 'not queueing', expected, 'upstream')
+            add('STO-02', title, Severity.HIGH, Status.PASS, h.name, "not queueing${vendorNote}".toString(), expected, 'upstream')
+        }
+    }
+
+    /** Below the site standard expectedPaths for one LUN on one host: a design often wants 4, and fewer is less redundancy. Unset by default and overridable, as test environments run fewer. */
+    private void expectedPathCheck(Host h, Map m) {
+        Integer want = st.val('expectedPaths') as Integer
+        if (!want) {
+            return
+        }
+        int n = (m.paths as List).size()
+        add('STO-12', "Enough storage paths: ${m.wwid}".toString(), Severity.MEDIUM, n < want ? Status.WARN : Status.PASS, h.name,
+                "${n} path(s)".toString(), ">= ${want}".toString(), st.source('expectedPaths'), null, Tier.NONE,
+                n < want ? "Fewer paths than the site design (${want}). STO-05 compares across hosts; this is the absolute floor. Set expectedPaths to your design, or lower it where fewer is deliberate.".toString() : null)
+    }
+
+    /**
+     * Array identity per map, from its trimmed INQUIRY vendor and product (StorageProfiles). A recognised family PASSes and
+     * carries its documented values to the other storage checks; an unknown vendor is NOT CHECKED, never PASS, so a
+     * vendor-specific rule never judges it. The transport is named. Target-port-group detail needs multipathd's %A, which
+     * exists only on 0.14.3 (26.04), so on 24.04 that part reads as not read rather than erroring.
+     */
+    private void storageVendorChecks(Host h) {
+        HostFacts f = h.facts
+        f.maps.each { Map m ->
+            StorageProfiles.Profile pr = StorageProfiles.forMap(m.vendor as String)
+            String vp = (m.vendor as String)?.replace(',', ' ') ?: 'unknown'
+            String transport = m.transport ?: (f.fcPresent && f.sessions == 0 ? 'fibre channel (host)' : (f.sessions ? 'iscsi (host)' : 'unknown'))
+            String tpg = tpgNote(f, m)
+            if (pr) {
+                add('STO-08', "Storage array recognised: ${m.wwid}".toString(), Severity.LOW, Status.PASS, h.name,
+                        "${vp} = ${pr.family}; transport ${transport}${tpg}".toString(), 'a known vendor profile', 'plugin', null, Tier.NONE,
+                        'Built from documentation, not seen live. The vendor/product pair gives a family, not a model.')
+            } else {
+                add('STO-08', "Storage array recognised: ${m.wwid}".toString(), Severity.LOW, Status.NOT_CHECKED, h.name,
+                        "unknown vendor ${vp}; transport ${transport}${tpg}".toString(), 'a known vendor profile', 'plugin', null, Tier.NONE,
+                        'No profile for this vendor, so its vendor-specific items are not checked and its values are shown, never judged against an absolute. The universal path, queue and daemon checks still run.')
+            }
+        }
+    }
+
+    /** Distinct ALUA target port groups a map's paths sit in, from multipathd's %A, which is readable only on 0.14.3 (26.04). */
+    private static String tpgNote(HostFacts f, Map m) {
+        if (f.mpathPathsExt == null) {
+            return ''
+        }
+        if (!f.mpathPathsExt) {
+            return '; target port groups not read (needs multipath-tools 0.14.3 on Ubuntu 26.04)'
+        }
+        List<String> tpgs = f.mpathPaths.findAll { (it.wwid as String)?.equalsIgnoreCase(m.wwid as String) && it.tpg }*.tpg.unique() as List<String>
+        tpgs ? "; ${tpgs.size()} target port group(s)".toString() : ''
+    }
+
+    /**
+     * Fibre Channel fabric health, read-only from sysfs. Each fc_host should be Online, at least one remote port a target and
+     * Online, and two adapters give redundancy. Link error counters are cumulative and rise on switch reboots and zoning
+     * changes, so they are shown, not judged. Built from documentation: no FC host has been seen, as the test hosts are iSCSI.
+     */
+    private void fibreChannelChecks(List<Host> hs) {
+        hs.findAll { it.facts.fcPresent && it.facts.fcHosts }.each { Host h ->
+            HostFacts f = h.facts
+            List<Map> online = f.fcHosts.findAll { (it.portState as String) =~ /(?i)online/ }
+            List<Map> targets = f.fcRports.findAll { (it.roles as String) =~ /(?i)target/ && (it.portState as String) =~ /(?i)online/ }
+            long errs = (f.fcHosts.sum { (it.linkFailures as long) + (it.lossOfSync as long) + (it.lossOfSignal as long) + (it.invalidCrc as long) } ?: 0L) as long
+            Status s = !online || (f.fcRports && !targets) ? Status.FAIL : (online.size() < 2 ? Status.WARN : Status.PASS)
+            add('STO-09', 'Fibre Channel fabric healthy', Severity.HIGH, s, h.name,
+                    "${online.size()} of ${f.fcHosts.size()} FC port(s) Online, ${targets.size()} target rport(s) up, ${errs} link error(s) cumulative".toString(),
+                    'every port Online, a target up, two adapters', 'plugin', null, Tier.NONE,
+                    s == Status.FAIL ? 'A Fibre Channel port is down, or no remote target port is Online, so paths may be lost. Check the HBA, optic, zoning and fabric. Built from documentation, not seen live.'
+                            : (s == Status.WARN ? 'Only one Fibre Channel adapter is Online, so one optic or HBA failing takes every path. Built from documentation, not seen live.'
+                            : 'Built from documentation, not seen live. Link error counters are cumulative and shown, not judged.'))
+        }
+    }
+
+    /** iSCSI boot login (node.startup) and the live recovery_tmo each session holds. Both apply only to iSCSI hosts; an FC host has neither section. */
+    private void iscsiTransportChecks(List<Host> hs) {
+        hs.each { Host h ->
+            HostFacts f = h.facts
+            if (f.iscsiNodes) {
+                List<Map> notAuto = f.iscsiNodes.findAll { it.startup != 'automatic' }
+                add('STO-10', 'iSCSI targets log in at boot', Severity.MEDIUM, notAuto ? Status.WARN : Status.PASS, h.name,
+                        notAuto ? "node.startup not automatic for ${notAuto.size()} of ${f.iscsiNodes.size()} target(s)".toString() : "${f.iscsiNodes.size()} target(s) automatic".toString(),
+                        'node.startup automatic', 'plugin', null, Tier.NONE,
+                        notAuto ? 'A rebooted host returns with no iSCSI session to these targets, so their GFS2 datastores do not mount. Set node.startup to automatic; the open-iscsi default is manual.' : null)
+            }
+            if (f.iscsiTmo) {
+                List<Integer> vals = f.iscsiTmo*.recoveryTmo.findAll { it != null }.unique().sort() as List<Integer>
+                Integer fromConfig = f.mpFastIoFail
+                String vendorExp = vendorRecoveryTmo(f)
+                boolean offConfig = fromConfig != null && vals.any { it != fromConfig }
+                boolean offVendor = !offConfig && vendorExp && vals.any { "${it}".toString() != vendorExp }
+                add('STO-11', 'iSCSI path recovery timeout', Severity.MEDIUM, offConfig || offVendor ? Status.WARN : Status.PASS, h.name,
+                        "recovery_tmo ${vals.join(', ')} s${fromConfig != null ? "; multipathd fast_io_fail_tmo ${fromConfig} s" : ''}".toString(),
+                        fromConfig != null ? "all sessions at ${fromConfig} s" : 'consistent across hosts', 'plugin', null, Tier.NONE,
+                        offConfig ? "A session's recovery_tmo is not multipathd's fast_io_fail_tmo (${fromConfig} s). A value of 120 means multipathd has not applied its setting, usually a path not in a map; the path then holds I/O far longer than intended."
+                                : (offVendor ? "recovery_tmo differs from the ${vendorExp} s this vendor documents. Built from documentation and not yet confirmed on a host, so this is unverified." : null))
+            }
+        }
+        Map<String, List<Integer>> perHost = hs.findAll { it.facts.iscsiTmo }.collectEntries { [(it.name): it.facts.iscsiTmo*.recoveryTmo.findAll { v -> v != null }.unique().sort()] }
+        if (perHost.size() > 1 && (perHost.values() as Set).size() > 1) {
+            add('STO-11', 'iSCSI path recovery timeout agrees across hosts', Severity.MEDIUM, Status.WARN, null,
+                    perHost.collect { k, v -> "${k}=${v.join('/')}" }.join(', '), 'same on every host', 'plugin', null, Tier.NONE,
+                    'Hosts hold I/O for different times during one failover. Bring their multipath fast_io_fail_tmo into line.')
+        }
+    }
+
+    /** The recovery_tmo a host's recognised vendor maps document, as a string; null when no known vendor, several vendors, or none stated. */
+    private static String vendorRecoveryTmo(HostFacts f) {
+        List<String> exp = f.maps.collect { StorageProfiles.forMap(it.vendor as String)?.recoveryTmo }.findAll { it != null }*.toString().unique() as List<String>
+        exp.size() == 1 ? exp[0] : null
+    }
+
+    /** multipathd's 7-day log of a map losing every path: "remaining active paths: 0" or "Entering recovery mode". After the fact this is the key near-miss, kept in a storage section rather than @@gfs2. */
+    private void allPathsLostChecks(List<Host> hs) {
+        hs.findAll { it.facts.sections.containsKey('mpath_log') }.each { Host h ->
+            Integer n = h.facts.pathsLost7d
+            add('STO-13', 'No all-paths-lost events in the storage log', Severity.HIGH, n == null ? Status.NOT_CHECKED : (n ? Status.FAIL : Status.PASS), h.name,
+                    n == null ? 'cannot tell: the multipathd log could not be read' : (n ? "${n} sighting(s) over 7 days, last: ${h.facts.pathsLostLast}".toString() : 'none in 7 days'),
+                    'none', 'upstream', null, Tier.NONE,
+                    n ? 'A map ran out of paths: on a GFS2 map that is a withdraw, and the moment before an all-paths-down outage. Find what took the paths, an array, a controller or a fabric, before it happens again. It clears 7 days after the last sighting.' : null)
         }
     }
 
@@ -1039,9 +1430,14 @@ class HealthChecker {
         }
         hs.each { Host h ->
             List<Map> noSsh = h.facts.peers.findAll { it.ssh == false }
-            if (h.facts.peers.any { it.ssh != null }) {
-                add('MIG-02', 'Reaches every peer on the migration port', Severity.HIGH, noSsh ? Status.FAIL : Status.PASS, h.name,
-                        noSsh ? "TCP 22 closed to ${noSsh*.addr.join(', ')}".toString() : "${h.facts.peers.size()} peer(s)".toString(), 'TCP 22 between hosts', 'hpe')
+            List<Map> noAgent = h.facts.peers.findAll { it.agent == false }
+            if (h.facts.peers.any { it.ssh != null || it.agent != null }) {
+                List<String> closed = []
+                if (noSsh) { closed << "TCP 22 closed to ${noSsh*.addr.join(', ')}".toString() }
+                if (noAgent) { closed << "TCP 7443 closed to ${noAgent*.addr.join(', ')}".toString() }
+                add('MIG-02', 'Reaches every peer on the migration port', Severity.HIGH, closed ? Status.FAIL : Status.PASS, h.name,
+                        closed ? closed.join('; ') : "${h.facts.peers.size()} peer(s)".toString(), 'TCP 22 and 7443 between hosts', 'hpe', null, Tier.NONE,
+                        closed ? 'HPE requires TCP 22 (hosts migrate over SSH) and TCP 7443 (the agent\'s heartbeat and quorum pings) between every host. A blocked 7443 makes a peer count as unreachable to the agent. Open them on the host and on whatever is between them.' : null)
             }
             List<Map> badPath = h.facts.peers.findAll { it.pathMtuOk == false }
             if (h.facts.peers.any { it.pathMtuOk != null }) {
@@ -1085,17 +1481,158 @@ class HealthChecker {
 
     /** N+1: if the largest host fails, can the rest hold every running VM? Memory is the limit that stops a restart. */
     private void capacityChecks() {
-        List<Host> sized = in_.hosts.findAll { it.maxMemory }
-        if (sized.size() != in_.hosts.size() || sized.size() < 2) {
+        Map m = memoryHeadroom(in_)
+        if (!m) {
             return
         }
-        long running = in_.morpheusVms.findAll { it.power == 'on' }.sum { (it.memory ?: 0L) as Long } as Long ?: 0L
-        long total = sized.sum { it.maxMemory } as Long
-        long survivors = total - (sized*.maxMemory.max() as Long)
+        long running = m.running as long, survivors = m.survivors as long
         long gib = 1L << 30
         add('CAP-01', 'VMs fit on the remaining hosts if the largest fails', Severity.MEDIUM, running > survivors ? Status.WARN : Status.PASS, null,
                 "${(running / gib) as long} GiB of running VMs, ${(survivors / gib) as long} GiB left without the largest host".toString(),
                 'running VMs fit', 'plugin', null, Tier.NONE, running > survivors ? 'Automatic failover could not restart every VM: some tenants would stay down until a host returned.' : null)
+    }
+
+    /** Memory of the running VMs, and what the hosts have without the largest. Null with fewer than 2 hosts, or a host of unknown size. */
+    static Map memoryHeadroom(Input input) {
+        List<Host> sized = input.hosts.findAll { it.maxMemory }
+        if (sized.size() != input.hosts.size() || sized.size() < 2) {
+            return null
+        }
+        long running = input.morpheusVms.findAll { it.power == 'on' }.sum { (it.memory ?: 0L) as Long } as Long ?: 0L
+        long total = sized.sum { it.maxMemory } as Long
+        [running: running, survivors: total - (sized*.maxMemory.max() as Long)]
+    }
+
+    /**
+     * vCPUs of the running VMs against the hosts' threads, or why that cannot be said: a host that did not answer, or a running VM with no size
+     * in Morpheus, would understate one side of it and read as room to spare.
+     */
+    static Map vcpuLoad(Input input) {
+        List<Host> unread = input.hosts.findAll { !it.facts?.complete || !it.facts.nproc }
+        if (!input.hosts || unread) {
+            return [why: input.hosts ? "no thread count from ${unread*.name.join(', ')}".toString() : 'no hosts']
+        }
+        List<Map> on = input.morpheusVms.findAll { it.power == 'on' }
+        int unsized = on.count { !it.cores }
+        if (unsized) {
+            return [why: "${unsized} running VM(s) have no vCPU count in Morpheus".toString()]
+        }
+        int seen = input.hosts.sum(0) { Host h -> h.facts.vms.count { it.state == 'running' } } as int
+        if (!on && seen) {
+            return [why: "Morpheus lists no running VMs, and the hosts report ${seen}".toString()]
+        }
+        [vcpus: on.sum(0L) { it.cores as long } as long, threads: input.hosts.sum(0L) { Host h -> h.facts.nproc as long } as long]
+    }
+
+    private void overcommitCheck() {
+        Map load = vcpuLoad(in_)
+        BigDecimal warn = st.val('vcpuWarnRatio') as BigDecimal, fail = st.val('vcpuFailRatio') as BigDecimal
+        String title = 'vCPUs against host threads'
+        if (load.why) {
+            add('CAP-02', title, Severity.MEDIUM, Status.NOT_CHECKED, null, "cannot tell: ${load.why}".toString(), "under ${warn} vCPUs per thread".toString(), st.source('vcpuWarnRatio'))
+            return
+        }
+        BigDecimal ratio = ((load.vcpus as long) / (load.threads as long)).setScale(2, java.math.RoundingMode.HALF_UP)
+        add('CAP-02', title, Severity.MEDIUM, ratio >= fail ? Status.FAIL : (ratio >= warn ? Status.WARN : Status.PASS), null,
+                "${load.vcpus} vCPUs of running VMs on ${load.threads} host threads: ${ratio} per thread".toString(), "under ${warn} vCPUs per thread".toString(), st.source('vcpuWarnRatio'), null, Tier.NONE,
+                ratio >= warn ? 'VMs wait for CPU when they are busy at once. This counts what is allotted, not what is used, so look at how busy the hosts really are before acting on it.' : null)
+    }
+
+    /** Below this many daily samples a straight line says little, so a forecast is not checked rather than a pass. */
+    static final int FORECAST_MIN_DAYS = 14
+    /** A line whose newest sample is older than this describes a cluster that is no longer being read. */
+    static final int FORECAST_MAX_AGE_DAYS = 7
+    private static final long GIB = 1L << 30
+
+    /** Days until a line reaches its limit, from today. 0 when it is already there; null when it is not growing, however close it is. */
+    static Long forecastDays(BigDecimal latest, BigDecimal slopePerDay, long ageDays, BigDecimal limit) {
+        if (latest >= limit) {
+            return 0L
+        }
+        slopePerDay > 0 ? Math.max(0L, (Math.ceil(((limit - latest) / slopePerDay) as double) as long) - ageDays) : null
+    }
+
+    /** Why a line says nothing yet, or null when it can be read. */
+    private static String unreadLine(Map line) {
+        if (!line || (line.n as int) < FORECAST_MIN_DAYS) {
+            return "${line?.n ?: 0} of ${FORECAST_MIN_DAYS} daily samples so far".toString()
+        }
+        (line.age as long) > FORECAST_MAX_AGE_DAYS ? "the newest sample is ${line.age} days old".toString() : null
+    }
+
+    /** CAP-03 and GFS-11 read what the monitor fills in from CapacityTrend, so the checker stays free of storage access. With no forecast given, it says nothing. */
+    private void forecastChecks() {
+        Map fc = in_.clusterConfig?.forecast as Map
+        if (fc == null) {
+            return
+        }
+        int days = st.intVal('forecastWarnDays')
+        String expected = "more than ${days} days".toString()
+        if (in_.hosts.size() >= 2) {
+            nPlusOneForecast(fc, days, expected)
+        }
+        if (!in_.layout?.hciCeph) {
+            datastoreForecast(fc, days, expected)
+        }
+    }
+
+    private void nPlusOneForecast(Map fc, int days, String expected) {
+        String title = 'N+1 memory lasts'
+        Map line = fc.nPlusOne as Map
+        String unread = fc.error ? "cannot tell: ${fc.error}".toString() : unreadLine(line)
+        if (unread) {
+            add('CAP-03', title, Severity.MEDIUM, Status.NOT_CHECKED, null, unread, expected, st.source('forecastWarnDays'))
+            return
+        }
+        Long left = forecastDays(line.latest as BigDecimal, line.slope as BigDecimal, line.age as long, line.limit as BigDecimal)
+        String trend = "${((line.latest as BigDecimal) / GIB) as long} GiB of running VMs, ${((line.limit as BigDecimal) / GIB) as long} GiB without the largest host, over ${line.n} daily samples".toString()
+        add('CAP-03', title, Severity.MEDIUM, left != null && left <= days ? Status.WARN : Status.PASS, null,
+                (left == null ? "not growing: ${trend}" : (left ? "about ${left} days left: ${trend}" : "already past: ${trend}")).toString(), expected, st.source('forecastWarnDays'), null, Tier.NONE,
+                left != null && left <= days ? 'A straight line through up to 90 days, so a step such as a new tenant moves it. Plan host memory, or fewer running VMs, before failover stops being able to restart everything.' : null)
+    }
+
+    private void datastoreForecast(Map fc, int days, String expected) {
+        BigDecimal failAt = st.val('gfs2FailPct') as BigDecimal
+        String title = 'Datastore space forecast'
+        boolean mounted = in_.hosts.any { it.facts?.tables || it.facts?.mounts }
+        List<Map> lines = (fc.datastores ?: []) as List<Map>
+        if (fc.error || (!lines && mounted)) {
+            add('GFS-11', title, Severity.MEDIUM, Status.NOT_CHECKED, null, fc.error ? "cannot tell: ${fc.error}".toString() : "no usage read yet, and 0 of ${FORECAST_MIN_DAYS} daily samples".toString(), expected, st.source('forecastWarnDays'))
+            return
+        }
+        lines.each { Map line ->
+            String unread = unreadLine(line)
+            String named = "${title}: ${line.target}".toString()
+            if (unread) {
+                add('GFS-11', named, Severity.MEDIUM, Status.NOT_CHECKED, null, unread, expected, st.source('forecastWarnDays'))
+                return
+            }
+            BigDecimal size = line.size as BigDecimal
+            Long left = forecastDays(line.latest as BigDecimal, line.slope as BigDecimal, line.age as long, size * failAt / 100)
+            String trend = "${((line.latest as BigDecimal) / GIB) as long} of ${(size / GIB) as long} GiB used, ${failAt}% is the limit, over ${line.n} daily samples".toString()
+            add('GFS-11', named, Severity.MEDIUM, left != null && left <= days ? Status.WARN : Status.PASS, null,
+                    (left == null ? "not growing: ${trend}" : (left ? "about ${left} days left: ${trend}" : "already there: ${trend}")).toString(), expected, st.source('forecastWarnDays'), null, Tier.NONE,
+                    left != null && left <= days ? 'A straight line through up to 90 days. GFS2 free space does not show how full a thin LUN\'s array is: see STO-07.' : null)
+        }
+    }
+
+    /** The array's own warning, which reaches a host as a SCSI sense code. A log that could not be read says nothing either way. */
+    private void thinLunChecks(List<Host> hs) {
+        if (in_.layout?.hciCeph) {
+            return
+        }
+        hs.findAll { it.facts.mode == 'full' && it.facts.sections.containsKey('thin') }.each { Host h ->
+            Integer soft = h.facts.thinSoft
+            Integer hard = h.facts.thinHard7d
+            List<String> woMaps = h.facts.maps.findAll { (it.wp as String) in ['ro', 'read-only'] }*.wwid as List<String>
+            boolean fail = (hard != null && hard > 0) || woMaps
+            Status s = fail ? Status.FAIL : (soft == null && hard == null ? Status.NOT_CHECKED : (soft ? Status.WARN : Status.PASS))
+            String obs = fail ? [hard ? "${hard} hard space-allocation failure(s) over 7 days, last: ${h.facts.thinHardLast}" : null, woMaps ? "write-protected map(s): ${woMaps.join(', ')}" : null].findAll().join('; ')
+                    : (soft == null && hard == null ? 'cannot tell: the kernel log could not be read' : (soft ? "${soft} in the kernel log over 7 days, last: ${h.facts.thinSoftLast}" : 'none in 7 days'))
+            add('STO-07', 'Array has not warned that a thin LUN is filling', Severity.HIGH, s, h.name, obs.toString(), 'none', 'plugin', null, Tier.NONE,
+                    fail ? 'The array has refused writes for lack of space (a hard space-allocation failure, SCSI sense 27/07 DATA PROTECT) or has write-protected a map. On a GFS2 map this withdraws the filesystem, however much free space df shows. Look at the array\'s pool now.'
+                            : (soft ? 'The array says a thin-provisioned LUN has crossed its soft limit. If its pool fills, writes fail and GFS2 withdraws, however much free space df shows. Look at the array now.' : null))
+        }
     }
 
     // ------------------------------------------------------------------ host
@@ -1133,6 +1670,42 @@ class HealthChecker {
                 add('FEN-01', 'Host management controller known', Severity.LOW, h.facts.bmcIp && h.facts.bmcIp != '0.0.0.0' ? Status.PASS : Status.WARN, h.name, h.facts.bmcIp ?: 'none', 'configured', 'plugin', null, Tier.NONE,
                         h.facts.bmcIp ? null : 'Without one there is no out-of-band way to prove this host is powered off when it fails.')
             }
+        }
+        fenceAgentCheck(hs)
+        apdChecks(hs)
+    }
+
+    /**
+     * FEN-02: advisory a00156214. Clusters created on Manager 8.0.11 or 8.0.12 used Pacemaker and the SCSI fence agent fence_scsi_hpevm, and a single
+     * host failure then powers off every surviving VM. The plugin API does not expose when a cluster was created, so the host-side agent is the proxy: a
+     * 1.3/2.0 host should not carry it. Built from documentation (search extracts), not seen on a host. Quiet on HCI Ceph, which does not use it.
+     */
+    private void fenceAgentCheck(List<Host> hs) {
+        if (in_.layout?.hciCeph) {
+            return
+        }
+        List<String> carriers = hs.findAll { it.facts.mode == 'full' && it.facts.sections.containsKey('fence_agent') && it.facts.fenceScsiAgent }*.name.sort()
+        if (!carriers) {
+            return
+        }
+        add('FEN-02', 'No SCSI fence agent from the 8.0.11/8.0.12 defect', Severity.HIGH, Status.WARN, null,
+                "fence_scsi_hpevm is present on ${carriers.join(', ')}".toString(), 'absent on layout 1.3/2.0', 'hpe', null, Tier.NONE,
+                'HPE advisory a00156214, built from documentation and not seen on a host: a cluster created on Manager 8.0.11 or 8.0.12, which used Pacemaker and this SCSI fence agent, turns off every surviving VM when one host fails, and the defect follows the cluster even after an upgrade. Layout 1.3 and 2.0 do their own fencing and should not carry this script, so its presence suggests this cluster began in that era. The plugin cannot read when a cluster was created, so confirm the creation version with HPE and apply hotfix 8.0.12-2 or a layout upgrade through HPE. Do not hand-edit the agent script; see docs/HPE-QUESTIONS.md.')
+    }
+
+    /**
+     * HB-02: the agent's all-paths-down shutdown. After about 6 failed heartbeat-write cycles it destroys every non-pinned VM on shared storage, and recovery
+     * is manual: the biggest uncovered outage, and after the fact the journal is the evidence. Full check only, as the event persists 7 days in the log. Quiet on HCI Ceph.
+     */
+    private void apdChecks(List<Host> hs) {
+        if (in_.layout?.hciCeph) {
+            return
+        }
+        hs.findAll { it.facts.mode == 'full' && it.facts.sections.containsKey('apd') }.each { Host h ->
+            Integer n = h.facts.apdSeen
+            add('HB-02', 'No all-paths-down VM shutdown recorded', Severity.CRITICAL, n == null ? Status.NOT_CHECKED : (n ? Status.FAIL : Status.PASS), h.name,
+                    n == null ? 'cannot tell: the host journal could not be read in time' : (n ? "${n} line(s) in the journal over 7 days, last: ${h.facts.apdLast}".toString() : 'none in 7 days'), 'none', 'hpe', null, Tier.NONE,
+                    n ? 'The agent counts failed heartbeat writes and, after about 6 cycles (roughly 2 minutes), destroys every non-pinned VM on shared storage to guard against split-brain; recovery is manual, and HPE says to alert on any occurrence. The decisive line is "Shutting down all VMs to protect data integrity", with the precursor "heartbeat datastore paths ... unhealthy ... for N checks". Find what lost the heartbeat datastore then (STO-01 paths, STO-06 latency, a withdrawal in GFS-10), start the VMs that were stopped, and keep the evidence for HPE. The exact agent wording and the destroy timer under path loss are unverified here: see docs/HPE-QUESTIONS.md. It clears 7 days after the last line.' : null)
         }
     }
 
@@ -1182,7 +1755,7 @@ class HealthChecker {
         List<String> old = read.findAll { k, v -> compareVersions(v, min) == -1 }.collect { k, v -> "${k}=${v}".toString() }
         add('PKG-03', 'Morpheus agent is at least the version that handled a freeze correctly', Severity.HIGH, old ? Status.WARN : Status.PASS, null,
                 old ? old.join(', ') : "${read.size()} host(s) at ${min} or later".toString(), ">= ${min}".toString(), st.source('agentMinVersion'), null, Tier.NONE,
-                old ? 'An older agent (3.2.6) acknowledged the wrong nodes in a real freeze, so GFS2 stayed frozen until someone acknowledged the right node by hand. Newer agents acknowledged correctly in every test. Ask HPE how to update it, and until then watch dlm_tool on the other hosts during any host removal.' : null)
+                old ? 'An older agent (3.2.6) acknowledged the wrong nodes in a real freeze, so GFS2 stayed frozen until someone acknowledged the right node by hand. Newer agents acknowledged correctly in every test. Upgrade through HPE, but in a maintenance window and one host at a time: an agent upgrade has itself triggered failover when run on a host outside maintenance (HPE fixed one such case in 8.0.13-2, and whether later versions are safe outside maintenance is unproven). Until then watch dlm_tool on the other hosts during any host removal. See docs/HPE-QUESTIONS.md.' : null)
     }
 
     /** If the manager's datastore freezes, the console and every alarm go with it, which is when they are needed. */
@@ -1323,7 +1896,9 @@ class HealthChecker {
         List<Host> configured = up.findAll { it.facts.corosync['device.model'] }
         if (!configured && !up.any { it.facts.qdeviceRow || it.facts.quorumFlags?.contains('Qdevice') }) {
             if (up) {
-                add('CLU-12', title, Severity.HIGH, Status.NA, null, 'this cluster has no quorum device', 'only where one is configured', 'upstream')
+                add('CLU-12', title, Severity.HIGH, Status.NA, null,
+                        'no corosync quorum device: HVM\'s two-node witness is a Distributed Worker over HTTPS and part of the agent quorum (CLU-14), not a corosync qdevice', 'only where a corosync qdevice is configured', 'upstream', null, Tier.NONE,
+                        'HPE\'s witness for a two-node cluster is a Distributed Worker reached at <Worker>/witness/<cluster UUID>/quorum over HTTPS, a quorum-only member of the agent quorum. It does not appear to corosync, so this check stays NA in normal HVM use and does not cover a witness. Built from HPE docs, not yet run against a real witness.')
             }
             return
         }
@@ -1399,25 +1974,93 @@ class HealthChecker {
             }
             if (f.smartctlPresent != false) {
                 f.bootDisks.each { Map d -> bootDiskCheck(h, d) }
+                f.raidDisks.each { Map d -> bootDiskCheck(h, d) }
+                if (f.raidDisksUnread) {
+                    add('HW-07', 'Physical disks behind the RAID controller read', Severity.HIGH, Status.NOT_CHECKED, h.name, "cannot tell: ${f.raidDisksUnread} physical disk(s) not read: over the limit of 24, out of time, or the controller stopped answering".toString(), 'healthy, no bad sectors', 'plugin')
+                }
             }
         }
     }
 
-    /** Reallocated sectors are only shown: vendors encode that counter differently, and a disk can run for years with a few. */
+    /**
+     * The disks under /, and physical disks behind a RAID controller, which have a slot. Reallocated sectors are only shown: vendors encode that counter differently, and a disk can run for years with a few.
+     * A disk read through its controller is physical whatever its model says. A WHEN_FAILED value other than a dash fails either kind.
+     */
     private void bootDiskCheck(Host h, Map d) {
-        String title = "Boot disk healthy (SMART): ${d.name}".toString()
+        String title = (d.slot ? "Disk healthy (SMART): ${d.slot} on bus ${d.bus}" : "Boot disk healthy (SMART): ${d.name}").toString()
         String expected = 'healthy, no bad sectors'
         String model = d.model ?: 'unknown model'
-        if (d.virtual || d.health == null) {
-            add('HW-07', title, Severity.HIGH, Status.NOT_CHECKED, h.name, "cannot tell: ${model} ${d.virtual ? 'is a virtual disk' : 'gave no SMART health'}".toString(), expected, 'plugin', null, Tier.NONE,
-                    'A RAID volume or a hypervisor\'s disk hides SMART from the host. Read the physical disks through their controller.')
+        boolean hidden = d.virtual && !d.slot
+        if (hidden || d.health == null) {
+            // only disks on the volume's own controller: a boot card's volume says nothing about the disks on a RAID controller beside it
+            List<Map> read = d.scsiHost ? h.facts.raidDisks.findAll { it.bus == d.scsiHost } : []
+            add('HW-07', title, Severity.HIGH, Status.NOT_CHECKED, h.name,
+                    "cannot tell: ${model} ${hidden ? 'is a virtual disk' : 'gave no SMART health'}${read ? ", so the physical disks on its controller were read instead: ${read*.slot.join(', ')}" : ''}".toString(), expected, 'plugin', null, Tier.NONE,
+                    d.slot ? 'The controller did not pass this disk\'s SMART health through. Read it with the controller\'s own tools.'
+                            : (read ? 'A RAID volume hides SMART from the host. Each physical disk on its controller has its own result here.' : 'A RAID volume or a hypervisor\'s disk hides SMART from the host. Read the physical disks through their controller.'))
             return
         }
         long bad = ((d.pending ?: 0L) as long) + ((d.uncorrectable ?: 0L) as long) + ((d.mediaErrors ?: 0L) as long)
-        boolean failing = !(d.health in ['PASSED', 'OK']) || !(d.critical in [null, '0x00', '0'])
+        List whenFailed = (d.whenFailed ?: []) as List
+        boolean failing = !(d.health in ['PASSED', 'OK']) || !(d.critical in [null, '0x00', '0']) || whenFailed
         add('HW-07', title, Severity.HIGH, failing ? Status.FAIL : (bad ? Status.WARN : Status.PASS), h.name,
-                "${model}: ${d.health}${d.critical && d.critical != '0x00' ? ', critical warning ' + d.critical : ''}, ${bad} bad sector(s) or media error(s), ${d.reallocated ?: 0} reallocated".toString(), expected, 'plugin', null, Tier.NONE,
-                failing || bad ? 'Replace this disk in a maintenance window. A host that loses its boot disk leaves the cluster uncleanly, which stalls every GFS2 datastore until it is acknowledged.' : null)
+                "${model}: ${d.health}${d.critical && d.critical != '0x00' ? ', critical warning ' + d.critical : ''}, ${bad} bad sector(s) or media error(s), ${d.reallocated ?: 0} reallocated${whenFailed ? ', failed attributes: ' + whenFailed.join(', ') : ''}".toString(), expected, 'plugin', null, Tier.NONE,
+                failing || bad ? (d.slot ? 'Replace this disk in a maintenance window, by the controller\'s own procedure. Check the state of its volume first.' : 'Replace this disk in a maintenance window. A host that loses its boot disk leaves the cluster uncleanly, which stalls every GFS2 datastore until it is acknowledged.') : null)
+    }
+
+    // ------------------------------------------------------------------ HPE's own checks
+
+    private static final Map<String, String> HVMCLI_UNREAD = [
+            missing   : 'cannot tell: this 2.0 host has no hvmcli',
+            unsafe    : 'not run: DLM did not say GFS2 is safe to touch, and this check may read GFS2',
+            no_time   : 'not run: too little of the probe\'s time limit was left',
+            timeout   : 'cannot tell: hvmcli did not answer within 30 s',
+            unreadable: 'cannot tell: hvmcli printed nothing that reads as its JSON',
+    ]
+
+    private static boolean hvmcliIgnored(Map c, Collection ignored) {
+        (c.check as String).toLowerCase() in ignored
+    }
+
+    private static Set<String> hvmcliIgnoreSet(Standards s) {
+        (s.val('hvmcliIgnore') as List<String>)*.toLowerCase() as Set<String>
+    }
+
+    /**
+     * Only shows HPE's answer, on HPE's thresholds, and only warns, as this plugin's own checks judge the same things. Its observed text names checks and never carries
+     * their details, which can name hosts and VMs: those stay in the tab's panel, out of alarms and reports. The title never changes, so an alarm survives a run that could not read.
+     */
+    private void hpeCheck(List<Host> hs) {
+        if (in_.layout?.version != '2.0') {
+            return
+        }
+        String title = 'HPE health check (hvmcli)'
+        String expected = 'no warning or failure outside hvmcliIgnore'
+        Set<String> ignored = hvmcliIgnoreSet(st)
+        hs.findAll { it.facts.mode == 'full' && it.facts.hvmcliState }.each { Host h ->
+            HostFacts f = h.facts
+            if (f.hvmcliState != 'read') {
+                add('HPE-01', title, Severity.MEDIUM, Status.NOT_CHECKED, h.name, HVMCLI_UNREAD[f.hvmcliState] ?: HVMCLI_UNREAD.unreadable, expected, 'hpe')
+                return
+            }
+            List<Map> raised = f.hvmcliChecks.findAll { it.status in ['WARN', 'FAIL'] && !hvmcliIgnored(it, ignored) }.sort { it.status == 'FAIL' ? 0 : 1 }
+            String names = raised.take(8).collect { "${it.status} ${it.check}" }.join(', ') + (raised.size() > 8 ? ", and ${raised.size() - 8} more" : '')
+            add('HPE-01', title, Severity.MEDIUM, raised ? Status.WARN : Status.PASS, h.name, raised ? names : "${f.hvmcliChecks.size()} checks read, nothing raised outside the ignored list".toString(), expected, 'hpe', null, Tier.NONE,
+                    raised ? 'These are HPE\'s thresholds. The HPE checks panel under Hosts shows what each one said. Where the plugin has its own check for the same thing, read that too.' : null)
+        }
+    }
+
+    /** The tab's panel: what HPE said on each host, marked. A quick check asks nothing, so the monitor keeps the last full check's. Null on a layout with no hvmcli. */
+    static List<Map> hpeView(Input in_) {
+        if (in_.layout?.version != '2.0') {
+            return null
+        }
+        Set<String> ignored = hvmcliIgnoreSet(in_.standards)
+        List<String> pacemaker = (Standards.DEFAULTS.hvmcliIgnore.value as List<String>)
+        in_.hosts.findAll { it.facts?.hvmcliState }.collect { Host h ->
+            [host: h.name, note: h.facts.hvmcliState == 'read' ? null : (HVMCLI_UNREAD[h.facts.hvmcliState] ?: HVMCLI_UNREAD.unreadable),
+             checks: h.facts.hvmcliChecks.collect { Map c -> c + [pacemaker: c.check in pacemaker, ignored: hvmcliIgnored(c, ignored)] }]
+        }
     }
 
     // ------------------------------------------------------------------ per-VM CPU drift
@@ -1519,10 +2162,12 @@ class HealthChecker {
     private void vmPortChecks(List<Host> hs) {
         hs.findAll { it.facts.sections.containsKey('vm_ports') }.each { Host h ->
             List<Map> ports = h.facts.vmPorts
-            String cut = h.facts.portsCut ? '; ran out of time, so not every VM was read' : ''
+            String cut = h.facts.portsCut ? '; not every VM could be read in time' : ''
             if (!ports) {
                 if (h.facts.portsCut) {
-                    add('NET-12', 'VM ports on the VLANs Morpheus says', Severity.HIGH, Status.NOT_CHECKED, h.name, 'cannot tell: ran out of time before reading any VM', 'each port on its network\'s VLAN', 'plugin')
+                    String why = 'cannot tell: no VM was read, as DLM is stopped, libvirt did not answer or time ran out'
+                    add('NET-12', 'VM ports on the VLANs Morpheus says', Severity.HIGH, Status.NOT_CHECKED, h.name, why, 'each port on its network\'s VLAN', 'plugin')
+                    add('NET-13', 'No unexpected trunk', Severity.HIGH, Status.NOT_CHECKED, h.name, why, 'one VLAN per port, unless the VM is in trunkAllowedVms', st.source('trunkAllowedVms'))
                 }
                 return
             }
@@ -1533,7 +2178,7 @@ class HealthChecker {
 
     /** Names can repeat across hosts, so the one Morpheus has on this host comes first. */
     private Map vmOf(Host h, Map p) {
-        in_.morpheusVms.find { it.name == p.vm && it.host == h.name } ?: in_.morpheusVms.find { it.name == p.vm }
+        vmRecord(in_.morpheusVms, h.name, p.vm as String)
     }
 
     private void vlanMatchCheck(Host h, List<Map> ports, String cut) {
@@ -1602,6 +2247,526 @@ class HealthChecker {
         } else if (!trunks) {
             add('NET-13', 'No unexpected trunk', Severity.HIGH, Status.PASS, h.name, "${ports.size() - unread.size()} port(s) read, none trunked${cut}".toString(), expected, st.source('trunkAllowedVms'))
         }
+    }
+
+    // ------------------------------------------------------------------ tenant isolation and side channels (full checks only)
+
+    /**
+     * The W-TENANT checks, all from the probe's @@sec section and so full-only. Nested-virtualization exposure, the kernel's escape-fix level,
+     * the host's side-channel state, the 2.0 bridge STP design, a customer port on an infrastructure VLAN, cache=unsafe, and a fleet note on per-VM limits.
+     * Everything here is detect-and-recommend: HPE owns the kernel, the CPU model and the bridge, and nothing changes a host by itself.
+     */
+    private void tenantSecurityChecks(List<Host> hs) {
+        hs.findAll { it.facts.sections.containsKey('sec') }.each { Host h ->
+            nestedVirtCheck(h)
+            kernelCveCheck(h)
+            cpuVulnNote(h)
+            bridgeStpNote(h)
+            infraVlanCheck(h)
+            vmCacheCheck(h)
+        }
+        limitsNote(hs)
+    }
+
+    /** Only a customer's running VM carries a tenant-isolation finding: an operator VM may be built this way on purpose, and one Morpheus does not know is judged by nothing. */
+    private boolean isCustomerVm(Host h, String libvirtName) {
+        Map vm = vmRecord(in_.morpheusVms, h.name, libvirtName)
+        vm?.operator == false && vm.status == 'provisioned' && vm.power == 'on'
+    }
+
+    private String vmLabel(Host h, String libvirtName) {
+        vmRecord(in_.morpheusVms, h.name, libvirtName)?.label ?: libvirtName
+    }
+
+    private static List<Integer> kernelParts(String s) {
+        def m = (s ?: '') =~ /(\d+)\.(\d+)\.(\d+)-(\d+)/
+        m.find() ? (1..4).collect { m.group(it) as Integer } : null
+    }
+
+    /** -1, 0 or 1 comparing two Ubuntu kernels by upstream version and ABI (the -NN that carries the fix); null when either cannot be parsed. */
+    static Integer kernelCompare(String a, String b) {
+        List<Integer> x = kernelParts(a), y = kernelParts(b)
+        if (x == null || y == null) {
+            return null
+        }
+        for (int i = 0; i < 4; i++) {
+            int c = x[i] <=> y[i]
+            if (c) {
+                return c
+            }
+        }
+        0
+    }
+
+    /**
+     * SEC-01. The gate is the host CPU exposing nested virtualization, not the per-VM "Enable Nested Virtualization" box: without it, even host-passthrough hides VMX/SVM.
+     * host-passthrough exposes it when the host's kvm module has nested on and no feature disables it; a named model exposes it only when it requires VMX/SVM. A named
+     * model with VMX disabled is not a finding. Built from HPE docs and one hand-edited VM, not seen as a Morpheus default.
+     */
+    private void nestedVirtCheck(Host h) {
+        HostFacts f = h.facts
+        boolean amd = f.nestedAmd != null && f.nestedIntel == null   // the loaded kvm module is the host's architecture
+        Boolean nested = amd ? f.nestedAmd : f.nestedIntel
+        String feat = amd ? 'SVM' : 'VMX'
+        List<Map> customer = f.vmSec.findAll { isCustomerVm(h, it.vm as String) }
+        if (!customer) {
+            return
+        }
+        List<String> exposed = [], unsure = []
+        customer.each { Map v ->
+            String policy = amd ? v.svm : v.vmx
+            if (policy == 'disable') {
+                return   // explicitly disabled: the HPE-template case, never a finding
+            }
+            if (v.cpuMode == 'host-passthrough') {
+                if (nested == Boolean.TRUE) {
+                    exposed << vmLabel(h, v.vm as String)
+                } else if (nested == null) {
+                    unsure << vmLabel(h, v.vm as String)
+                }
+            } else if (policy in ['require', 'force']) {
+                exposed << vmLabel(h, v.vm as String)   // a running named-model VM that requires it is presenting it to the guest
+            }
+        }
+        String expected = "customer VMs do not expose ${feat} to their guests".toString()
+        if (exposed) {
+            add('SEC-01', 'Customer VM exposes CPU virtualization to its guest', Severity.HIGH, Status.WARN, h.name,
+                    "${exposed.unique().sort().join(', ')}".toString(), expected, 'plugin', null, Tier.NONE,
+                    "A customer VM presenting ${feat} to its guest can run a nested hypervisor, which widens the guest-to-host attack surface; see SEC-02 for whether the kernel carries the escape fix. The real control is the cluster CPU Model, not the per-VM box: a named model with ${feat} disabled removes this. Built from HPE docs and one hand-edited VM, not a Morpheus default. Operators only; raise the cluster CPU Model with HPE.")
+        } else if (unsure) {
+            add('SEC-01', 'Customer VM exposes CPU virtualization to its guest', Severity.HIGH, Status.NOT_CHECKED, h.name,
+                    "cannot tell for ${unsure.unique().sort().join(', ')}: host-passthrough, and the kvm nested parameter could not be read".toString(), expected, 'plugin')
+        } else {
+            add('SEC-01', 'Customer VM exposes CPU virtualization to its guest', Severity.HIGH, Status.PASS, h.name,
+                    "${customer.size()} customer VM(s), none exposing ${feat}".toString(), expected, 'plugin')
+        }
+    }
+
+    /** SEC-02. The running kernel against the layout's known escape-fix level, failing only where nesting is actually exposed. A FAIL nobody can clear if HPE has not published the kernel, so the text says to ask HPE. */
+    private void kernelCveCheck(Host h) {
+        HostFacts f = h.facts
+        String min = st.val('kernelCveMin') as String
+        String expected = min ? "at or above ${min}".toString() : 'a kernel carrying the KVM escape fix'
+        if (!min) {
+            add('SEC-02', 'Kernel carries the KVM guest-to-host escape fix', Severity.HIGH, Status.NOT_CHECKED, h.name, 'cannot tell: no fixed kernel version is set for this layout', expected, st.source('kernelCveMin'))
+            return
+        }
+        Integer cmp = kernelCompare(f.kernel, min)
+        if (cmp == null) {
+            add('SEC-02', 'Kernel carries the KVM guest-to-host escape fix', Severity.HIGH, Status.NOT_CHECKED, h.name, "cannot tell: could not read the kernel version (${f.kernel ?: 'none'})".toString(), expected, st.source('kernelCveMin'))
+            return
+        }
+        boolean nestedOn = f.nestedIntel == Boolean.TRUE || f.nestedAmd == Boolean.TRUE || !f.vmNoMigrate.isEmpty()
+        String tail = "; ${nestedOn ? 'nested virtualization is exposed on this host' : 'nested virtualization appears off here'}".toString()
+        add('SEC-02', 'Kernel carries the KVM guest-to-host escape fix', Severity.HIGH, cmp >= 0 ? Status.PASS : (nestedOn ? Status.FAIL : Status.WARN), h.name,
+                "${f.kernel}${cmp >= 0 ? '' : tail}".toString(), expected, st.source('kernelCveMin'), null, Tier.NONE,
+                cmp >= 0 ? null : "This kernel is below the level that fixes the 2026 KVM guest-to-host escapes (Januscape, Zapscape). ${nestedOn ? 'Nesting is exposed here, so an untrusted guest is one module load from the host.' : 'Nesting looks off, which limits the exposure.'} Ask HPE which HVM OS kernel carries the fix; do not patch outside HPE's workflow. The ABI level is unverified against HPE's build, so set kernelCveMin if yours differs.".toString())
+    }
+
+    /** SEC-03. Detection only, no exploit: the host's own side-channel mitigation state and SMT, for an operator to read. HPE owns the kernel, microcode and SMT policy, so this raises nothing. */
+    private void cpuVulnNote(Host h) {
+        HostFacts f = h.facts
+        if (!f.cpuVulns && f.smtActive == null) {
+            return
+        }
+        List<String> vuln = f.cpuVulns.findAll { k, v -> v?.toLowerCase()?.contains('vulnerable') }.collect { k, v -> "${k}: ${v}".toString() }.sort()
+        String smt = f.smtActive == null ? 'SMT state unknown' : "SMT ${f.smtActive.trim() == '1' ? 'on' : 'off'}".toString()
+        add('SEC-03', 'CPU side-channel mitigations (for information)', Severity.LOW, Status.NA, h.name,
+                (vuln ? "${vuln.size()} marked Vulnerable: ${vuln.take(6).join('; ')}${vuln.size() > 6 ? '; ...' : ''}".toString() : 'none marked Vulnerable') + "; ${smt}".toString(), 'detection only', 'plugin', null, Tier.NONE,
+                'Detection only, no exploit. HPE owns the kernel, microcode and SMT policy; this surfaces the host\'s own reported state for an operator. SEC-02 is the actionable kernel-fix level.')
+    }
+
+    /** SEC-04. The 2.0 VLAN-filtering bridges' STP state, a note to raise with HPE: either setting has an isolation or outage risk, and HPE does not document which it chooses. */
+    private void bridgeStpNote(Host h) {
+        if (in_.layout?.profile != '2.0') {
+            return   // 1.3 is Open vSwitch; NET-13 covers its trunking
+        }
+        List<Map> vmBridges = h.facts.secBridges.findAll { it.filtering == true }
+        if (!vmBridges) {
+            return
+        }
+        add('SEC-04', '2.0 bridge STP design (for information)', Severity.LOW, Status.NA, h.name,
+                vmBridges.collect { "${it.bridge}: STP ${it.stp == null ? 'unknown' : (it.stp ? 'on' : 'off')}".toString() }.join(', '), 'raise the STP design with HPE', 'plugin', null, Tier.NONE,
+                'With STP on, a guest can send superior BPDUs and take the root role on this VLAN-aware bridge; with it off, guest BPDUs reach the uplink, where a switch\'s BPDU guard can err-disable the host\'s trunk. HPE documents neither. Do not change STP on a live bridge: it can drop corosync. Raise the design with HPE.')
+    }
+
+    /** SEC-05. A customer VM port sharing a VLAN with host infrastructure. The storage VLAN is the dangerous one: a guest there could try to reach the LUN that holds every tenant's disks. Built from docs. */
+    private void infraVlanCheck(Host h) {
+        HostFacts f = h.facts
+        List<Integer> infra = f.infraVlans*.vlan.unique() as List<Integer>
+        List<Map> ports = f.vmPorts.findAll { it.read && isCustomerVm(h, it.vm as String) }
+        if (!infra || !ports) {
+            return   // an untagged infrastructure interface gives nothing to compare, and no customer port means nothing of ours here
+        }
+        boolean any = false
+        ports.each { Map p ->
+            List<Integer> vlans = (([p.access] + (p.tagged ?: [])).findAll { it != null }) as List<Integer>
+            List<Integer> hit = vlans.findAll { it in infra }
+            if (hit) {
+                any = true
+                List<String> roles = f.infraVlans.findAll { it.vlan in hit }*.role.unique()
+                add('SEC-05', "Customer VM on a host ${roles.contains('storage') ? 'storage' : 'infrastructure'} VLAN: ${vmLabel(h, p.vm as String)}".toString(), roles.contains('storage') ? Severity.HIGH : Severity.MEDIUM, Status.WARN, h.name,
+                        "${p.dev} is on VLAN ${hit.join(', ')}, which also carries the host's ${roles.join(' and ')} traffic".toString(), 'customer ports off the host storage and cluster VLANs', 'plugin', null, Tier.NONE,
+                        "This customer VM shares a VLAN with host ${roles.join(' and ')} traffic. On the storage VLAN a guest could try to reach the LUN that holds every tenant's disks. Confirm on the host, then move the VM off that VLAN. Built from HPE docs, not seen live. Operators only.".toString())
+            }
+        }
+        if (!any) {
+            add('SEC-05', 'Customer VM on a host infrastructure VLAN', Severity.MEDIUM, Status.PASS, h.name, "${ports.size()} customer port(s), none on a host infrastructure VLAN".toString(), 'customer ports off the host storage and cluster VLANs', 'plugin')
+        }
+    }
+
+    /** VM-07. cache=unsafe tells QEMU to drop the guest's flushes, so a host crash can lose data the guest believed written: the one cache mode that is wrong on a clustered datastore. */
+    private void vmCacheCheck(Host h) {
+        List<Map> seen = h.facts.vmSec.findAll { (it.caches as List)?.contains('unsafe') }
+        if (seen) {
+            add('VM-07', 'No VM disk ignores guest flushes', Severity.HIGH, Status.FAIL, h.name,
+                    "cache=unsafe: ${seen.collect { vmLabel(h, it.vm as String) }.unique().sort().join(', ')}".toString(), 'no disk on cache=unsafe', 'plugin', null, Tier.NONE,
+                    'A disk with cache=unsafe ignores the guest\'s flushes, so a host crash can lose data the guest believed was written. It is the one cache mode that is wrong on a clustered datastore. Reconfigure the VM off cache=unsafe. A CD-ROM on cache=unsafe would read here too, so confirm it is a data disk.')
+        } else if (h.facts.vmSec) {
+            add('VM-07', 'No VM disk ignores guest flushes', Severity.HIGH, Status.PASS, h.name, "${h.facts.vmSec.size()} VM(s), none on cache=unsafe".toString(), 'no disk on cache=unsafe', 'plugin')
+        }
+    }
+
+    /** SEC-06. Morpheus documents almost no per-VM limit, so this is universally true today: one fleet note, never an alarm per VM. */
+    private void limitsNote(List<Host> hs) {
+        List<Map> customerVms = hs.findAll { it.facts.sections.containsKey('sec') }.collectMany { Host h -> h.facts.vmSec.findAll { isCustomerVm(h, it.vm as String) } }
+        if (!customerVms) {
+            return
+        }
+        int limited = customerVms.count { it.limited }
+        add('SEC-06', 'Per-VM resource limits', Severity.LOW, Status.NA, null,
+                "${customerVms.size()} running customer VM(s), ${limited} with a per-VM I/O, CPU or network limit set".toString(), 'a fleet note, not an alarm', 'plugin', null, Tier.NONE,
+                'HVM documents almost no per-VM disk, CPU or network limit, so fairness on a shared datastore or uplink rests on the array and the host, not on Morpheus. This is one fleet note, never an alarm per VM. Raise plan-level I/O and bandwidth limits with HPE.')
+    }
+
+    // ------------------------------------------------------------------ what a host is short of
+
+    /** Only for a host whose probe had these sections. None of it touches a datastore, so a frozen host still answers. */
+    private void hostLoadChecks(List<Host> hs) {
+        hs.findAll { it.facts.sections.containsKey('host_health') }.each { Host h ->
+            oomCheck(h)
+            swapCheck(h)
+            cpuPressureCheck(h)
+            memoryPressureCheck(h)
+            rootDiskCheck(h)
+            vmCrashCheck(h)
+        }
+    }
+
+    private void oomCheck(Host h) {
+        String title = 'No process killed for lack of memory'
+        if (!h.facts.oomRead) {
+            add('HST-04', title, Severity.HIGH, Status.NOT_CHECKED, h.name, 'cannot tell: the kernel log could not be read', 'none in 24 h', 'plugin')
+            return
+        }
+        List<Map> kills = h.facts.oomKills
+        boolean vm = kills.any { it.qemu }
+        add('HST-04', title, Severity.HIGH, vm ? Status.FAIL : (kills ? Status.WARN : Status.PASS), h.name,
+                kills ? "${kills.size()} in 24 h: ${kills.groupBy { it.comm }.collect { k, v -> "${k} (${v.size()})" }.join(', ')}".toString() : 'none in 24 h', 'none in 24 h', 'plugin', null, Tier.NONE,
+                vm ? 'The kernel killed a VM to free memory, so this host is overcommitted. VM-06 names it. Start it on a host with room, and move others off before it happens again.'
+                        : (kills ? 'The kernel ran out of memory here, and the next one it picks can be a VM or a cluster daemon. Find what grew.' : null))
+    }
+
+    private void swapCheck(Host h) {
+        String title = 'Host not swapping'
+        BigDecimal rate = h.facts.swapPerSec
+        String expected = "< ${st.intVal('swapWarnPagesPerSec')} pages per second".toString()
+        if (rate == null) {
+            add('HST-05', title, Severity.MEDIUM, Status.NOT_CHECKED, h.name, 'cannot tell: the swap counters could not be read', expected, st.source('swapWarnPagesPerSec'))
+            return
+        }
+        boolean over = rate >= st.intVal('swapWarnPagesPerSec')
+        add('HST-05', title, Severity.MEDIUM, over ? Status.WARN : Status.PASS, h.name, "${rate} pages per second over 2 s".toString(), expected, st.source('swapWarnPagesPerSec'), null, Tier.NONE,
+                over ? 'A VM whose memory is on swap stalls on every page it touches. Move VMs off, and see HST-07.' : null)
+    }
+
+    private void cpuPressureCheck(Host h) {
+        String title = 'CPU not under pressure'
+        int warn = st.intVal('cpuPressureWarnPct'), fail = st.intVal('cpuPressureFailPct')
+        BigDecimal psi = h.facts.psiCpu
+        String steal = h.facts.stealPct == null ? 'CPU steal not read' : "CPU steal ${h.facts.stealPct}%"
+        String expected = "< ${warn}% of the last minute".toString()
+        if (psi == null) {
+            add('HST-06', title, Severity.MEDIUM, Status.NOT_CHECKED, h.name, "cannot tell: this kernel offers no /proc/pressure/cpu; ${steal}".toString(), expected, st.source('cpuPressureWarnPct'))
+            return
+        }
+        boolean stolen = h.facts.stealPct != null && h.facts.stealPct >= 5
+        add('HST-06', title, Severity.MEDIUM, psi >= fail ? Status.FAIL : (psi >= warn ? Status.WARN : Status.PASS), h.name, "a task waited for CPU ${psi}% of the last minute; ${steal}".toString(), expected, st.source('cpuPressureWarnPct'), null, Tier.NONE,
+                psi >= warn ? (stolen ? 'Steal this high means whatever runs this host is taking its CPU, so look there first.' : 'See which VMs are busiest on this host, and whether vCPUs are overcommitted.') : null)
+    }
+
+    private void memoryPressureCheck(Host h) {
+        String title = 'Memory not under pressure'
+        int warn = st.intVal('memPressureWarnPct'), fail = st.intVal('memPressureFailPct')
+        BigDecimal psi = h.facts.psiMemory
+        String expected = "< ${warn}% of the last minute".toString()
+        if (psi == null) {
+            add('HST-07', title, Severity.MEDIUM, Status.NOT_CHECKED, h.name, 'cannot tell: this kernel offers no /proc/pressure/memory', expected, st.source('memPressureWarnPct'))
+            return
+        }
+        add('HST-07', title, Severity.MEDIUM, psi >= fail ? Status.FAIL : (psi >= warn ? Status.WARN : Status.PASS), h.name, "a task waited for memory ${psi}% of the last minute".toString(), expected, st.source('memPressureWarnPct'), null, Tier.NONE,
+                psi >= warn ? 'Every VM here slows down while the host reclaims memory, and the next step is HST-04. Move VMs off.' : null)
+    }
+
+    /** What the probe read is judged, so a bad filesystem still shows beside one it could not read. Nothing bad and something unread is not a pass. */
+    private void rootDiskCheck(Host h) {
+        String title = 'Room on the host\'s own disks'
+        int warn = st.intVal('rootDiskWarnPct'), fail = st.intVal('rootDiskFailPct')
+        String expected = "< ${warn}% of space and inodes".toString()
+        List<Map> read = h.facts.rootFs.findAll { it.pct != null || it.inodePct != null }
+        if (!read) {
+            add('HST-08', title, Severity.HIGH, Status.NOT_CHECKED, h.name, 'cannot tell: df did not answer', expected, st.source('rootDiskWarnPct'))
+            return
+        }
+        BigDecimal worst = read.collectMany { [it.pct, it.inodePct] }.findAll { it != null }.max()
+        String seen = read.collect { Map d -> "${d.target}: ${d.pct == null ? 'no space figure' : d.pct + '% space'}, ${d.inodePct == null ? 'no inode limit' : d.inodePct + '% inodes'}" }.join('; ')
+        Status status = worst >= fail ? Status.FAIL : (worst >= warn ? Status.WARN : (h.facts.rootFsCut ? Status.NOT_CHECKED : Status.PASS))
+        add('HST-08', title, Severity.HIGH, status, h.name, h.facts.rootFsCut ? "${seen}; df did not finish, so not every path was read".toString() : seen, expected, st.source('rootDiskWarnPct'), null, Tier.NONE,
+                worst >= warn ? 'A host with a full disk stops logging, and the agent and libvirt can fail with it, leaving it unmanageable. Clear space before it fills.' : null)
+    }
+
+    private String crashTime(long seconds) {
+        java.text.SimpleDateFormat f = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm 'UTC'")
+        f.timeZone = TimeZone.getTimeZone('UTC')
+        f.format(new Date(seconds * 1000L))
+    }
+
+    private static List<Map> recentCrashes(HostFacts f, long nowMs) {
+        long now = f.now ?: (nowMs / 1000L) as long
+        f.vmCrashes.findAll { it.at != null && now - (it.at as long) <= 86400L }
+    }
+
+    /** The libvirt names of the VMs VM-06 reports on this host, whatever room its text has. For the availability figures. */
+    static Set<String> stoppedVms(HostFacts f, long nowMs) {
+        (recentCrashes(f, nowMs)*.vm + f.oomKills.findAll { it.qemu && it.vm }*.vm) as Set<String>
+    }
+
+    /** The same VMs, each with the times it stopped, in ms: none for a kill whose line had no time. */
+    static Map<String, List<Long>> stopTimes(HostFacts f, long nowMs) {
+        Map<String, List<Long>> out = stoppedVms(f, nowMs).collectEntries { [(it): []] }
+        (recentCrashes(f, nowMs) + f.oomKills.findAll { it.qemu && it.vm && it.at }).each { out[it.vm as String] << ((it.at as long) * 1000L) }
+        out
+    }
+
+    /** VMs by Morpheus's name where it has one. A log touched today can still hold an older crash, so the line's own time decides. */
+    private void vmCrashCheck(Host h) {
+        String title = 'No VM crashed or killed for lack of memory'
+        String expected = 'none in 24 h'
+        HostFacts f = h.facts
+        Closure<String> label = { String vm -> vmRecord(in_.morpheusVms, h.name, vm)?.label ?: vm }
+        Map<String, String> found = [:]
+        recentCrashes(f, in_.nowMs).each { found[it.vm as String] = "${label(it.vm as String)} crashed at ${crashTime(it.at as long)}".toString() }
+        List<Map> killed = f.oomKills.findAll { it.qemu }
+        killed.findAll { it.vm }.each { found[it.vm as String] = "${label(it.vm as String)} killed for lack of memory${it.at ? ' at ' + crashTime(it.at as long) : ''}".toString() }
+        List<String> seen = found.values() as List<String>
+        int unnamed = killed.count { !it.vm }
+        if (unnamed && !found) {
+            seen << "${unnamed} VM(s) killed for lack of memory; the kernel log did not name them".toString()
+        }
+        List<String> undated = f.vmCrashes.findAll { it.at == null }*.vm.unique().collect { label(it as String) }
+        if (seen) {
+            add('VM-06', title, Severity.MEDIUM, Status.WARN, h.name, seen.take(8).join('; ') + (seen.size() > 8 ? "; and ${seen.size() - 8} more" : ''), expected, 'plugin', null, Tier.NONE,
+                    'Its guest stopped without warning, so its owner may need to know. HST-04 shows whether this host ran out of memory. Otherwise look in the VM\'s log under /var/log/libvirt/qemu.')
+        } else if (undated) {
+            add('VM-06', title, Severity.MEDIUM, Status.NOT_CHECKED, h.name, "cannot tell: a crash line with a time that could not be read, for ${undated.take(4).join(', ')}".toString(), expected, 'plugin')
+        } else if (!f.vmLogsRead || !f.oomRead) {
+            add('VM-06', title, Severity.MEDIUM, Status.NOT_CHECKED, h.name, "cannot tell: ${f.vmLogsRead ? 'the kernel log' : 'libvirt\'s VM logs'} could not be read".toString(), expected, 'plugin')
+        } else {
+            add('VM-06', title, Severity.MEDIUM, Status.PASS, h.name, expected, expected, 'plugin')
+        }
+    }
+
+    // ------------------------------------------------------------------ host OS: patching, kernel posture, network timing (full check only)
+
+    /**
+     * Can an automatic update reach this host and restart corosync or dlm? The danger is a fleet-wide 06:00 restart. The safe case is an
+     * HVM-sourced host whose needrestart drop-in leaves the cluster stack alone. All read-only; the plugin never changes apt or needrestart.
+     */
+    private void patchExposureChecks(List<Host> hs) {
+        hs.findAll { it.facts.sections.containsKey('patch_exposure') }.each { Host h ->
+            HostFacts f = h.facts
+            String title = 'Automatic updates cannot restart the cluster stack'
+            String expected = 'no stock-Ubuntu auto-upgrade, or the cluster daemons exempt from needrestart'
+            boolean exempt = f.nrListOnly || f.nrClusterExempt > 0
+            boolean uuActive = f.uuInstalled && f.uuPeriodic?.isInteger() && (f.uuPeriodic as int) > 0 && !(f.uuTimer in ['disabled', 'masked'])
+            boolean stock = f.aptUbuntuSources > 0
+            String found = "unattended-upgrades ${f.uuInstalled ? 'installed' : 'not installed'}${f.uuInstalled ? ", periodic=${f.uuPeriodic ?: 'unset'}, timer ${f.uuTimer ?: 'unknown'}" : ''}; ${stock ? f.aptUbuntuSources + ' stock Ubuntu source(s)' : 'HPE sources only'}; needrestart ${f.nrInstalled ? 'installed' : 'not installed'}${exempt ? ', cluster stack exempt' : (f.nrInstalled ? ', no cluster-stack exemption' : '')}".toString()
+            if (stock && uuActive && !exempt) {
+                add('PKG-04', title, Severity.HIGH, Status.WARN, h.name, found, expected, 'plugin', null, Tier.NONE,
+                        'This host takes updates from Ubuntu\'s archive, unattended-upgrades is on, and needrestart may restart corosync or dlm after a library update. On a GFS2 member that stalls every datastore, and it fires on every host inside one 06:00 window. Raise with HPE; until then patch through maintenance or add a needrestart list-only drop-in. The plugin changes nothing.')
+            } else {
+                add('PKG-04', title, Severity.HIGH, Status.PASS, h.name, found, expected, 'plugin', null, Tier.NONE,
+                        exempt ? null : 'A package upgrade can still restart corosync or dlm itself (PKG-01, PKG-03): patch one host at a time in a maintenance window, per HPE.')
+            }
+        }
+    }
+
+    /** What makes a sick node die rather than hang. Read-only sysctls, taint, the GFS2 mount error policy and PCIe AER. These are HPE's to own; the plugin changes none of them. */
+    private void kernelPostureChecks(List<Host> hs) {
+        hs.findAll { it.facts.sections.containsKey('kernel_posture') }.each { Host h ->
+            panicCheck(h)
+            taintCheck(h)
+            aerCheck(h)
+        }
+    }
+
+    private void panicCheck(Host h) {
+        HostFacts f = h.facts
+        String title = 'Panic settings safe for a clustered host'
+        String expected = 'hung_task_panic off; kernel.panic 0; errors=withdraw'
+        Long hung = f.panicSysctls['hung_task_panic']
+        Long soft = f.panicSysctls['softlockup_panic']
+        Long panic = f.panicSysctls['panic']
+        boolean errorsPanic = f.gfs2MountOpts.any { (it.options as String)?.tokenize(',')?.contains('errors=panic') }
+        if (f.panicSysctls.isEmpty()) {
+            add('KRN-01', title, Severity.HIGH, Status.NOT_CHECKED, h.name, 'cannot tell: the panic sysctls could not be read', expected, 'plugin')
+            return
+        }
+        List<String> warns = []
+        if (soft != null && soft != 0L) { warns << 'softlockup_panic set' }
+        if (panic != null && panic > 0L) { warns << "kernel.panic=${panic}".toString() }
+        if (errorsPanic) { warns << 'errors=panic on a GFS2 mount' }
+        List<String> seen = f.panicSysctls.collect { k, v -> "${k}=${v}".toString() }
+        if (errorsPanic) { seen << 'errors=panic' }
+        Status status = hung != null && hung != 0L ? Status.FAIL : (warns ? Status.WARN : Status.PASS)
+        add('KRN-01', title, Severity.HIGH, status, h.name, seen.join(', '), expected, 'plugin', null, Tier.NONE,
+                status == Status.FAIL ? 'hung_task_panic is set, so a normal fence wait on a frozen datastore could panic every surviving host at once, taking the whole cluster down from one host failure. Ask HPE to clear it; the plugin does not change sysctls.'
+                        : (warns ? "Review with HPE: ${warns.join('; ')}. A non-zero kernel.panic reboots a panicked host, which can clear a fence wait by a clean rejoin, but reboot-loops on a recurring fault; softlockup_panic and errors=panic turn a survivable event into a crash. HPE owns these; the plugin does not change them.".toString() : null))
+    }
+
+    private void taintCheck(Host h) {
+        String title = 'Kernel not tainted by a fault'
+        String expected = 'no fault bits'
+        Long t = h.facts.taint
+        if (t == null) {
+            add('KRN-02', title, Severity.MEDIUM, Status.NOT_CHECKED, h.name, 'cannot tell: /proc/sys/kernel/tainted could not be read', expected, 'plugin')
+            return
+        }
+        Map<Long, String> bits = [(32L): 'a bad page', (128L): 'an oops or BUG', (16L): 'a machine check', (16384L): 'a soft lockup']
+        List<String> fail = [32L, 128L].findAll { (t & it) != 0L }.collect { bits[it] }
+        List<String> warn = [16L, 16384L].findAll { (t & it) != 0L }.collect { bits[it] }
+        Status status = fail ? Status.FAIL : (warn ? Status.WARN : Status.PASS)
+        add('KRN-02', title, Severity.MEDIUM, status, h.name, fail || warn ? "tainted ${t}: ${(fail + warn).join(', ')}".toString() : "tainted ${t}".toString(), expected, 'plugin', null, Tier.NONE,
+                fail || warn ? 'The kernel marked itself after a fault, and the bit holds until reboot, so this host has already hit something. A crash from it freezes every GFS2 datastore. Find the cause in the kernel log and plan a reboot. Proprietary and out-of-tree module bits are ignored here.' : null)
+    }
+
+    private void aerCheck(Host h) {
+        HostFacts f = h.facts
+        String title = 'No PCIe bus errors'
+        if (f.aerFatal == null && f.aerNonfatal == null && f.aerCorrectable == null) {
+            add('KRN-03', title, Severity.MEDIUM, Status.NOT_CHECKED, h.name, 'cannot tell: no PCIe AER counters here (firmware-first platforms may expose none)', 'none', 'plugin')
+            return
+        }
+        long fatal = f.aerFatal ?: 0L, nonfatal = f.aerNonfatal ?: 0L, corr = f.aerCorrectable ?: 0L
+        boolean bad = fatal > 0 || nonfatal > 0
+        add('KRN-03', title, Severity.MEDIUM, bad ? Status.WARN : Status.PASS, h.name,
+                "fatal ${fatal}, non-fatal ${nonfatal}, correctable ${corr} since boot".toString(), 'none', 'plugin', null, Tier.NONE,
+                bad ? 'A device on the PCIe bus is reporting errors, which can mean a NIC or HBA failing under iSCSI or corosync load. Find it in the kernel log (PCIe Bus Error) and plan a replacement. Correctable errors alone are shown for context, not alarmed, as the counter only grows.' : null)
+    }
+
+    /** Bond failover timing, link-flap counters, and 2.0 bridge VLAN filtering. Read-only; changing a bond or a bridge is HPE's, in maintenance. */
+    private void netTimingChecks(List<Host> hs) {
+        int flapWarn = st.intVal('linkFlapWarnPerHour')
+        hs.findAll { it.facts.sections.containsKey('net_timing') }.each { Host h ->
+            bondTimingCheck(h)
+            linkFlapCheck(h, flapWarn)
+            if (in_.layout?.version == '2.0') {
+                bridgeFilterCheck(h)
+            }
+        }
+    }
+
+    private static final Set<String> SLOW_BOND_MODES = ['balance-rr', 'balance-xor', 'balance-tlb', 'balance-alb'] as Set
+
+    private void bondTimingCheck(Host h) {
+        h.facts.bondTiming.each { Map b ->
+            String title = "Bond fails over fast enough for corosync: ${b.name}".toString()
+            List<String> why = []
+            if (b.mode == '802.3ad' && b.lacpRate == 'slow') { why << 'LACP rate slow (up to 90 s to fail over)' }
+            if ((b.miimon == null || b.miimon == 0L) && (b.arpInterval == null || b.arpInterval == 0L)) { why << 'no link monitoring (miimon and ARP both off)' }
+            if (b.mode in SLOW_BOND_MODES) { why << "mode ${b.mode} is not advised with corosync".toString() }
+            String seen = "mode ${b.mode ?: '?'}, miimon ${b.miimon ?: 0} ms, up/down ${b.updelay ?: 0}/${b.downdelay ?: 0} ms${b.lacpRate ? ', LACP ' + b.lacpRate : ''}".toString()
+            add('NET-17', title, Severity.MEDIUM, why ? Status.WARN : Status.PASS, h.name, why ? "${seen}; ${why.join('; ')}".toString() : seen,
+                    'fast failover: MII polling on, LACP fast, an active-backup or 802.3ad mode', 'plugin', null, Tier.NONE,
+                    why ? 'A slow bond takes longer to notice a dead link than corosync takes to evict the host, so a cable fault can cost cluster membership and freeze GFS2. Change bond timing only on a host in maintenance, through hvmcli, with both switch ports set for LACP fast where that is the fix. The plugin changes nothing.' : null)
+        }
+    }
+
+    private void linkFlapCheck(Host h, int warnPerHour) {
+        List<Map> flaps = h.facts.linkFlaps.findAll { it.changes != null }
+        String title = 'Network links are not flapping'
+        String expected = "< ${warnPerHour} carrier changes per hour".toString()
+        if (!flaps) {
+            add('NET-18', title, Severity.MEDIUM, Status.NOT_CHECKED, h.name, 'cannot tell: no carrier counters could be read', expected, st.source('linkFlapWarnPerHour'))
+            return
+        }
+        Long upSec = h.facts.now != null && h.facts.boot != null ? h.facts.now - h.facts.boot : null
+        BigDecimal hours = upSec != null && upSec > 0 ? ([upSec / 3600G, 1G].max() as BigDecimal) : 1G
+        Closure<BigDecimal> perHour = { Map m -> ((m.changes as Long) / hours).setScale(1, java.math.RoundingMode.HALF_UP) }
+        List<Map> over = flaps.findAll { perHour(it) >= warnPerHour }
+        add('NET-18', title, Severity.MEDIUM, over ? Status.WARN : Status.PASS, h.name,
+                over ? over.collect { "${it.name}=${perHour(it)}/h (${it.changes} since boot)" }.join(', ')
+                     : "${flaps.size()} NIC(s), most ${flaps.collect { perHour(it) }.max()} per hour".toString(),
+                expected, st.source('linkFlapWarnPerHour'), null, Tier.NONE,
+                over ? 'A link going up and down drops cluster and storage traffic each time, while reading up whenever the check samples. Find the optic, cable or switch port. This is a rate since boot, so a short recent burst on a long-running host is diluted.' : null)
+    }
+
+    private void bridgeFilterCheck(Host h) {
+        h.facts.bridges.each { Map br ->
+            String name = br.name as String
+            String title = "Bridge filters VLANs: ${name}".toString()
+            String stp = br.stpState == '1' ? ', STP on' : ''
+            if (br.vlanFiltering == null) {
+                add('NET-19', title, Severity.HIGH, Status.NOT_CHECKED, h.name, "cannot tell: vlan_filtering could not be read for ${name}".toString(), 'VLAN filtering on', 'plugin')
+                return
+            }
+            if (br.vlanFiltering != '0') {
+                add('NET-19', title, Severity.HIGH, Status.PASS, h.name, "vlan_filtering on${stp}".toString(), 'VLAN filtering on', 'plugin')
+                return
+            }
+            // A per-VLAN bridge carries one VLAN in its name (e.g. hvmbr0.60), so filtering off does not cross tenants: isolation is the separate bridge. Seen as the real HVM 2.0 layout on a host.
+            if (name ==~ /.*\.\d+/) {
+                add('NET-19', title, Severity.LOW, Status.NA, h.name, "vlan_filtering off${stp}; single-VLAN bridge".toString(), 'VLAN filtering on, or a single-VLAN bridge', 'plugin', null, Tier.NONE,
+                        'This is a per-VLAN bridge (one bridge for one VLAN), so VLAN filtering off does not cross tenants: the isolation is the separate bridge, not the filter. HVM 2.0 can instead use one VLAN-aware bridge with filtering on. Confirm the intended 2.0 bridge model with HPE; the plugin changes nothing.')
+                return
+            }
+            add('NET-19', title, Severity.HIGH, Status.WARN, h.name, "vlan_filtering off${stp}".toString(), 'VLAN filtering on', 'plugin', null, Tier.NONE,
+                    'With VLAN filtering off on a bridge that carries more than one VLAN, a VM on it can put its traffic on any VLAN the bridge carries, so tenant isolation is gone. HPE\'s 2.0 virtswitch sets filtering on for the VLAN-aware bridge. A per-VLAN bridge usually carries its VLAN in the name; this one does not, so confirm the 2.0 bridge model with HPE. The plugin does not change the bridge.')
+        }
+    }
+
+    // ------------------------------------------------------------------ busiest VMs
+
+    private static BigDecimal iops(Map a) { (a.readIops as BigDecimal) + (a.writeIops as BigDecimal) }
+
+    private static Map vmRecord(List<Map> vms, String host, String vm) {
+        vms.find { it.name == vm && it.host == host } ?: vms.find { it.name == vm }
+    }
+
+    /**
+     * For the tab, operators only, and never in a report: it names tenants. [host, vm, tenant, cpuPct, readIops, writeIops, readMBs, writeMBs], the five busiest VMs
+     * per host that sampled, by share of the host's I/O plus share of its CPU, so a VM heavy in either shows. cpuPct is of the whole host, not of one CPU.
+     */
+    static List<Map> busiest(Input in_) {
+        in_.hosts.collectMany { Host h ->
+            List<Map> all = h.facts?.vmActivity ?: []
+            BigDecimal io = (all.sum { iops(it) } ?: 0G) as BigDecimal
+            BigDecimal cpu = (all.sum { (it.cpuPct ?: 0G) as BigDecimal } ?: 0G) as BigDecimal
+            Closure<BigDecimal> share = { Map a -> (io ? iops(a) / io : 0G) + (cpu ? ((a.cpuPct ?: 0G) as BigDecimal) / cpu : 0G) }
+            all.findAll { share(it) > 0 }.sort(false) { a, b -> share(b) <=> share(a) ?: (a.vm as String) <=> (b.vm as String) }.take(5).collect { Map a ->
+                Map vm = vmRecord(in_.morpheusVms, h.name, a.vm as String)
+                [host: h.name, vm: vm?.label ?: a.vm, tenant: vm?.tenant, cpuPct: a.cpuPct, readIops: a.readIops, writeIops: a.writeIops, readMBs: a.readMBs, writeMBs: a.writeMBs]
+            }
+        } as List<Map>
+    }
+
+    /** Names a VM and never its tenant. Empty when the probe did not sample, or nothing was doing I/O. */
+    private String busiestHint(Host h) {
+        Map top = h.facts.vmActivity.findAll { iops(it) > 0 }.max { iops(it) }
+        if (!top) {
+            return ''
+        }
+        " Busiest VM on this host: ${vmRecord(in_.morpheusVms, h.name, top.vm as String)?.label ?: top.vm}, ${iops(top)} IOPS.".toString()
     }
 
     // ------------------------------------------------------------------ maximum frame size

@@ -34,6 +34,20 @@ class HealthContext {
     /** The script stops reading this long before its limit, so that what it has read gets back here rather than being lost with it. */
     private static final long PROBE_MARGIN_SEC = 30
     static final long FIX_TIMEOUT_SEC = 180
+    /**
+     * For a quick check after one where a host gave no answer at all, so a host that stays silent does not hold a checker for the whole limit every time. The script
+     * still gets 45 s, about three times what a quick probe was measured to take, and what a host reads in that time still counts.
+     */
+    static final long SILENT_PROBE_TIMEOUT_SEC = 75
+    static final long WATCH_TIMEOUT_SEC = 20
+    /** What the freeze watch reads: DLM first, then quorum, each with its own limit within WATCH_TIMEOUT_SEC. Nothing here touches GFS2. DLM_RC tells an empty answer from a failed one. */
+    static final String WATCH_SCRIPT = '''export LC_ALL=C PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+echo "@@dlm_ls"
+timeout -k 2 8 dlm_tool ls 2>/dev/null
+echo "DLM_RC=$?"
+echo "@@quorum"
+timeout -k 2 5 corosync-quorumtool -s 2>/dev/null
+'''
 
     final MorpheusContext morpheus
     final ComputeServerGroup cluster
@@ -57,6 +71,13 @@ class HealthContext {
                 .sort { it.name }
     }
 
+    /** A cluster's hypervisor nodes with no context to build, which itself reads the cluster. */
+    static List<ComputeServer> liveHosts(MorpheusContext morpheus, Long clusterId) {
+        morpheus.services.computeServer.list(new DataQuery().withFilter('serverGroup.id', clusterId))
+                .findAll { it.parentServer == null && it.status != REMOVING }
+                .sort { it.name }
+    }
+
     Layout layout() {
         String code = cluster.layout?.code
         if (!code && cluster.layout?.id) {
@@ -71,6 +92,10 @@ class HealthContext {
 
     /** [exit, output]; a host that does not answer in time is an answer in itself. */
     Map run(ComputeServer host, String script, long timeoutSec = FIX_TIMEOUT_SEC) {
+        runOn(morpheus, host, script, timeoutSec)
+    }
+
+    static Map runOn(MorpheusContext morpheus, ComputeServer host, String script, long timeoutSec) {
         TaskResult tr = morpheus.executeCommandOnServer(host, wrap(script)).timeout(timeoutSec, TimeUnit.SECONDS).blockingGet()
         String out = tr.output ?: (tr.data instanceof String ? tr.data : '') ?: ''
         Integer code = tr.exitCode?.isInteger() ? tr.exitCode as Integer : (tr.success ? 0 : 1)
@@ -146,7 +171,7 @@ class HealthContext {
         Map<Long, Boolean> operators = [:]
         morpheus.services.computeServer.list(new DataQuery().withFilter('cloud.id', cloudId))
                 .findAll { it.parentServer?.id && ids.contains(it.parentServer.id) }
-                .collect { ComputeServer v -> [name: v.externalId ?: v.name, label: v.name, ips: [v.internalIp, v.externalIp].findAll() as List<String>, host: names[v.parentServer.id], power: v.powerState?.name(), memory: v.maxMemory, tenant: tenantName(v.account),
+                .collect { ComputeServer v -> [name: v.externalId ?: v.name, label: v.name, ips: [v.internalIp, v.externalIp].findAll() as List<String>, host: names[v.parentServer.id], power: v.powerState?.name(), memory: v.maxMemory, cores: v.maxCores, tenant: tenantName(v.account),
                                          status: v.status, tenantId: v.account?.id, operator: operatorTenant(v.account, operators), nics: nicsOf(v, nets), disks: disksOf(v)] }
     }
 
@@ -373,6 +398,6 @@ class HealthContext {
                                      os: it.facts?.osVersion, dStuck: it.facts?.dCount ?: 0] },
          results: rs.collect { [id: it.id, title: it.title, severity: it.severity.name(), status: it.status.name(), host: it.host, observed: it.observed,
                                 expected: it.expected, source: it.source, fix: it.fix, tier: it.tier.name(), hint: it.hint, impact: it.impact] },
-         standards: in_.standards.toList()]
+         standards: in_.standards.toList(), busiest: HealthChecker.busiest(in_)]
     }
 }

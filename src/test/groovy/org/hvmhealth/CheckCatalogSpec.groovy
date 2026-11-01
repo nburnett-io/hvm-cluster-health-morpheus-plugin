@@ -9,6 +9,7 @@ import spock.lang.Specification
 class CheckCatalogSpec extends Specification {
     static final File CHECKER = new File('src/main/groovy/org/hvmhealth/checks/HealthChecker.groovy')
     static final File MONITOR = new File('src/main/groovy/org/hvmhealth/morpheus/HealthMonitor.groovy')
+    static final File CORRELATOR = new File('src/main/groovy/org/hvmhealth/morpheus/FleetCorrelator.groovy')
     static final File CATALOG = new File('src/main/groovy/org/hvmhealth/checks/CheckCatalog.groovy')
     static final File DOC = new File('docs/CHECKS.md')
     static final String REGENERATE = '$env:UPDATE_CHECKS_DOC="1"; .\\gradlew.bat test --rerun --tests "*CheckCatalogSpec*"; Remove-Item env:UPDATE_CHECKS_DOC'
@@ -16,7 +17,7 @@ class CheckCatalogSpec extends Specification {
 
     /** Every id the code can emit: add('X-1', powerOnSetting('X-1' and new Result('X-1'. */
     static Set<String> emitted() {
-        [CHECKER, MONITOR].collectMany { File f ->
+        [CHECKER, MONITOR, CORRELATOR].collectMany { File f ->
             f.getText('UTF-8').findAll(/\b(?:add|powerOnSetting|Result)\(\s*'([A-Z]+-\d+)'/) { m, id -> id }
         } as Set
     }
@@ -44,7 +45,7 @@ class CheckCatalogSpec extends Specification {
         String all = [CHECKER, MONITOR].collect { it.getText('UTF-8') }.join('\n')
 
         expect:
-        all.findAll(/\b(?:CAP|CLU|DLM|FEN|GFS|HA|HB|HST|HW|LAY|MIG|MOR|NET|PKG|PRB|STO|TIM|VM)-\d\d\b/).toSet() - CheckCatalog.ENTRIES.keySet() == [] as Set
+        all.findAll(/\b(?:CAP|CLU|DLM|FEN|FLT|GFS|HA|HB|HST|HW|LAY|MIG|MOR|NET|PKG|PRB|STO|TIM|VM)-\d\d\b/).toSet() - CheckCatalog.ENTRIES.keySet() == [] as Set
     }
 
     def 'no id is written twice, as a map keeps only the last'() {

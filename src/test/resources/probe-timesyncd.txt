@@ -82,6 +82,9 @@ Membership information
          1          1 hvm-node01
          2          1 hvm-node02 (local)
          3          1 hvm-node03
+@@agent_quorum
+AGENT_QUORUM={"quorumAchieved":true,"fenced":false,"waitFencing":false,"totalNodes":3,"reachableNodes":3,"corosyncActive":true,"dlmActive":true,"corosyncQuorate":true,"nodes":[{"name":"hvm-node01","reachable":true},{"name":"hvm-node02","reachable":true},{"name":"hvm-node03","reachable":true}]}
+QUORUM_NODES=["hvm-node01","hvm-node02","hvm-node03"]
 @@links
 Local node ID 2, transport knet
 LINK ID 0 udp
@@ -209,5 +212,15 @@ WATCHDOG=
 HW_PRODUCT=Server X
 HW_BIOS=1.0
 HW_BMC=
+@@host_health
+PSI_CPU=0.40
+PSI_MEMORY=0.00
+OOM_READ=1
+VM_LOGS_READ=1
+ROOT_DF=/|40|12
+ROOT_DF=/boot|30|1
+@@host_sample
+SWAP_SAMPLE=0|0
+CPU_SAMPLE=11200|0
 @@end
 COMPLETE=1

@@ -19,6 +19,10 @@ class HostFacts {
     Integer expectedVotes, totalVotes, quorumVotes
     List<Map> nodelist = []                      // [nodeid, name, addr]
     List<Map> quorumMembers = []                 // [nodeid, votes, name]
+    /** HPE agent quorum from https://127.0.0.1:7443/quorum, the operational authority on 1.3/2.0: [achieved, fenced, waitFencing, reachable, total, corosyncActive, dlmActive, corosyncQuorate]. Null when it could not be read or did not parse as JSON; field names are only partly documented, so each is read defensively. */
+    Map agentQuorum
+    /** Member identifiers the agent lists, from the /quorum nodes and /opt/morpheus-node/.quorum-nodes, lower-cased. Empty when none could be read. Its exact format is undocumented. */
+    List<String> agentQuorumNodes = []
     List<Map> linkFaults = []
     Long runtimeToken, runtimeConsensus
     List<Map> lockspaces = []                    // [name, flags, members, status, newMembers]
@@ -32,6 +36,14 @@ class HostFacts {
     List<Map> heartbeats = []                    // [host, ms]
     Integer gfsErrors                            // GFS2 consistency errors and withdrawals in the kernel log over 7 days, across reboots; null if unread
     String gfsErrorLast
+    Integer dlmConvErrors                        // DLM lock-conversion failures (validate_lock_args/lm_lock ret -22, the QUECVT defect) in the kernel log over 7 days; null if unread
+    String dlmConvErrorLast
+    Map<String, Integer> gfsBlock = [:]          // GFS2 lock table -> lock_module/block (DFL_BLOCK_LOCKS): 1 = locking blocked on this host
+    Integer thinSoft                             // thin provisioning soft threshold warnings in the kernel log over 7 days; null if unread
+    String thinSoftLast
+    Integer apdSeen                              // agent all-paths-down VM-shutdown sightings in the host journal over 7 days; null if unread
+    String apdLast
+    Boolean fenceScsiAgent                       // /usr/sbin/fence_scsi_hpevm present: the layout-1.2 SCSI fence agent (advisory a00156214); null when the section was not read
     Map<String, Integer> dComms = [:]
     List<String> dVms = []
     List<Map> vms = []                           // [name, state]
@@ -84,16 +96,85 @@ class HostFacts {
     Boolean opensslPresent, smartctlPresent
     boolean certsInUse, portsCut
     List<Map> certs = []                         // [path, notAfter (epoch s, null when unread)]
-    List<Map> bootDisks = []                     // [name, model, virtual, health, pending, uncorrectable, reallocated, mediaErrors, critical]
+    List<Map> bootDisks = []                     // [name, scsiHost, model, virtual, health, pending, uncorrectable, reallocated, mediaErrors, critical, whenFailed]
+    List<Map> raidDisks = []                     // physical disks behind a RAID controller: the same, plus [slot, bus]
+    int raidDisksUnread                          // listed by smartctl's scan, but not read: over the limit, out of time, or the controller stopped answering
+    /** How reading hvmcli health check went: read, missing, unsafe, no_time, timeout or unreadable. Null when the probe did not try. */
+    String hvmcliState
+    List<Map> hvmcliChecks = []                  // [check, type, status, details], each bounded
     /** [vm, dev, mac, bridge, kind (ovs, bridge), read, why, access, tagged, all, untagged] */
     List<Map> vmPorts = []
+    /** "some avg60" of /proc/pressure, as a percentage; null where the kernel offers none. */
+    BigDecimal psiCpu, psiMemory
+    /** Over the 2 s storage sample; null when the counters could not be read. Steal is the share of CPU time a hypervisor under this host took. */
+    BigDecimal stealPct, swapPerSec
+    /** Whether the kernel log and libvirt's VM logs were read; null when the probe had no such section. */
+    Boolean oomRead, vmLogsRead
+    List<Map> oomKills = []                      // [at (epoch s), comm, vm, qemu]; vm only where the kernel named its cgroup
+    List<Map> vmCrashes = []                     // [vm (libvirt domain), at (epoch s, null when unread)]
+    List<Map> rootFs = []                        // [target, pct, inodePct]; a percentage is null when it has none
+    boolean rootFsCut
+    /** Rates between two samples of every running VM: [vm, cpuPct (of the whole host), readIops, writeIops, readMBs, writeMBs]. Empty when the probe did not sample. */
+    List<Map> vmActivity = []
+    /** @@patch_exposure, @@kernel_posture, @@net_timing are full-check only. Each stays null or empty when the probe had no such section. */
+    Boolean uuInstalled, nrInstalled             // unattended-upgrades and needrestart installed
+    String uuPeriodic, uuTimer                   // APT::Periodic::Unattended-Upgrade value, and the apt-daily-upgrade.timer state
+    int aptUbuntuSources                         // apt source entries pointing at a stock ubuntu.com archive
+    boolean nrListOnly                           // needrestart set to list-only, so an upgrade restarts nothing
+    int nrClusterExempt                          // needrestart drop-ins that name the cluster daemons (HVM's mvm drop-in)
+    List<String> aptSourceFiles = []
+    Map<String, Long> panicSysctls = [:]         // hung_task_panic, softlockup_panic, panic, panic_on_oops; only the ones read
+    Long taint                                   // /proc/sys/kernel/tainted; null when unread
+    List<Map> gfs2MountOpts = []                 // [target, options] from /proc/mounts
+    Long aerFatal, aerNonfatal, aerCorrectable   // PCIe AER counts summed across devices; null when no AER files were found
+    List<Map> bondTiming = []                    // [name, mode, miimon, updelay, downdelay, arpInterval, lacpRate, hashPolicy]
+    List<Map> linkFlaps = []                     // [name, changes, downCount] carrier transitions since boot per physical NIC
+    List<Map> bridges = []                       // [name, vlanFiltering, stpState] linux bridges
+
+    // ---- 0.4.0 W-STO: vendor-neutral storage (transport, Fibre Channel, iSCSI timers) ----
+    /** Any /sys/class/fc_host present, so this host has a Fibre Channel transport. */
+    boolean fcPresent
+    List<Map> fcHosts = []                       // [host, portState, speed, portName, linkFailures, lossOfSync, lossOfSignal, invalidCrc]
+    List<Map> fcRports = []                      // [rport, portState, roles, devLossTmo, fastIoFailTmo]
+    /** Per-path transport, from multipathd show paths %P; tpg/maxSectors only when mpathPathsExt. */
+    List<Map> mpathPaths = []                    // [wwid, dev, proto, adapter, tpg, maxSectors]
+    /** %A (TPG) and %k (max_sectors_kb) are 0.14.3 (26.04) only; null when the probe had no @@mpath_paths section. */
+    Boolean mpathPathsExt
+    List<Map> iscsiNodes = []                    // [target, startup]: node.startup from iscsiadm -m node -o show
+    List<Map> iscsiTmo = []                      // [session, recoveryTmo]: live /sys/class/iscsi_session/*/recovery_tmo
+    /** multipathd defaults polling_interval and fast_io_fail_tmo; null when unread (polling then taken as 5). */
+    Integer mpPolling, mpFastIoFail
+    /** All-paths-lost sightings over 7 days ("remaining active paths: 0" / "Entering recovery mode"); null if unread. */
+    Integer pathsLost7d
+    String pathsLostLast
+    /** Hard space-allocation failures over 7 days (sense 27/07 / "critical space allocation" / write-protect); null if unread. */
+    Integer thinHard7d
+    String thinHardLast
+
+    // ---- @@sec: tenant isolation and side-channel state (full checks only). Null/empty when the probe had no such section.
+    /** Whether kvm_intel / kvm_amd expose nested virtualization: true=on, false=off, null=the module parameter could not be read. */
+    Boolean nestedIntel, nestedAmd
+    /** /sys/devices/system/cpu/vulnerabilities/<name> -> its one-line value. */
+    Map<String, String> cpuVulns = [:]
+    String smtControl, smtActive, cpuCmdline
+    /** [role (cluster, storage), vlan]: the VLAN a host infrastructure interface is tagged with. Absent for an untagged interface. */
+    List<Map> infraVlans = []
+    /** [bridge, stp (Boolean), filtering (Boolean)] for every Linux bridge on the host, read from @@sec for SEC-04. */
+    List<Map> secBridges = []
+    /** [vm, cpuMode, vmx, svm, caches (List), limited]: from each running VM's domain XML. vmx/svm is 'disable', 'require', 'force' or null. */
+    List<Map> vmSec = []
+    boolean secCut
 
     static HostFacts parse(String text) {
         HostFacts f = new HostFacts()
         String cur = null
         (text ?: '').readLines().each { String l ->
-            if (l.startsWith('@@')) {
-                cur = l.substring(2).trim()
+            // Only an exact "@@" plus a lowercase section token starts a section. A tenant's VM name reaches this output as a field value, so a
+            // line such as "@@end COMPLETE=1" smuggled through a name must read as content, not forge a section; and should a bare "@@end" slip
+            // through, the probe prints the real one last and each marker resets its list, so the genuine trailing section wins.
+            String name = l.startsWith('@@') ? l.substring(2) : null
+            if (name != null && name ==~ /[a-z][a-z0-9_]*/) {
+                cur = name
                 f.sections[cur] = []
             } else if (cur) {
                 f.sections[cur] << l
@@ -145,6 +226,7 @@ class HostFacts {
         corosyncKey = sections.corosync_key?.find { it?.trim() }?.trim()
         parseCorosyncConf(sections.corosync_conf ?: [])
         parseQuorum(sections.quorum ?: [])
+        parseAgentQuorum()
         parseLinks(sections.links ?: [])
         (sections.totem ?: []).each { String l ->
             def t = l =~ /totem\.(token|consensus) \(\w+\) = (\d+)/
@@ -171,6 +253,21 @@ class HostFacts {
         String gfsErr = kv('gfs2').GFS2_ERRORS_7D
         gfsErrors = gfsErr?.isInteger() ? gfsErr as Integer : null
         gfsErrorLast = kv('gfs2').GFS2_ERROR_LAST
+        String convErr = kv('gfs2').DLM_CONV_ERR_7D
+        dlmConvErrors = convErr?.isInteger() ? convErr as Integer : null
+        dlmConvErrorLast = kv('gfs2').DLM_CONV_ERR_LAST
+        rows('gfs2', 'BLOCK').each { if (it.size() == 2 && it[1]?.trim()?.isInteger()) { gfsBlock[it[0]] = it[1].trim() as Integer } }
+        String thin = kv('thin').THIN_SOFT_7D
+        thinSoft = thin?.isInteger() ? thin as Integer : null
+        thinSoftLast = kv('thin').THIN_SOFT_LAST
+        String thinH = kv('thin').THIN_HARD_7D
+        thinHard7d = thinH?.isInteger() ? thinH as Integer : null
+        thinHardLast = kv('thin').THIN_HARD_LAST
+        String apd = kv('apd').APD_7D
+        apdSeen = apd?.isInteger() ? apd as Integer : null
+        apdLast = kv('apd').APD_LAST
+        String fsAgent = kv('fence_agent').FENCE_SCSI
+        fenceScsiAgent = fsAgent == null ? null : (fsAgent.trim() == '1')
         heartbeats = rows('gfs2_fs', 'HB').findAll { it[0] }.collect { [host: it[0], ms: lng(it.size() > 1 ? it[1] : null)] }
 
         Map st = kv('stuck')
@@ -192,6 +289,19 @@ class HostFacts {
         parseMultipath(sections.multipath ?: [])
         Map<String, String> queueing = rows('multipath_queue', 'MP_QUEUE').findAll { it.size() == 2 }.collectEntries { [(it[0]): it[1].trim()] }
         maps.each { it.queueing = queueing[it.wwid] }
+        mpPolling = kv('multipath_queue').MP_POLLING?.isInteger() ? kv('multipath_queue').MP_POLLING as Integer : null
+        mpFastIoFail = kv('multipath_queue').MP_FAST_IO_FAIL?.isInteger() ? kv('multipath_queue').MP_FAST_IO_FAIL as Integer : null
+        parseFc(sections.fc)
+        parseMpathPaths(sections.mpath_paths)
+        parseIscsiTimers(sections.iscsi_timers)
+        // transport per map, from the paths' %P; host-level fcPresent covers a map no path row matched
+        maps.each { Map mp ->
+            List<String> protos = mpathPaths.findAll { (it.wwid as String)?.equalsIgnoreCase(mp.wwid as String) }*.proto.findAll().unique() as List<String>
+            mp.transport = protos.size() == 1 ? protos[0] : (protos.size() > 1 ? 'mixed' : null)
+        }
+        String pl = kv('mpath_log').PATHS_LOST_7D
+        pathsLost7d = pl?.isInteger() ? pl as Integer : null
+        pathsLostLast = kv('mpath_log').PATHS_LOST_LAST
         Map is = kv('iscsi')
         sessions = int0(is.SESSIONS)
         errors24h = int0(is.ERRORS_24H)
@@ -217,7 +327,8 @@ class HostFacts {
         peers = rows('ring', 'PEER').collect { [addr: it[0], loss: it.size() > 1 && it[1]?.isInteger() ? it[1] as Integer : null,
                                                 rttMs: it.size() > 2 && it[2]?.isBigDecimal() ? it[2] as BigDecimal : null,
                                                 ssh: it.size() > 3 ? it[3] == '1' : null, pathMtuOk: it.size() > 4 ? it[4] == '1' : null,
-                                                mtu: it.size() > 5 && it[5]?.isInteger() ? it[5] as Integer : null] }
+                                                mtu: it.size() > 5 && it[5]?.isInteger() ? it[5] as Integer : null,
+                                                agent: it.size() > 6 ? it[6] == '1' : null] }
 
         Map lo = kv('layout')
         ovsBridges = lo.OVS_BRIDGES
@@ -295,7 +406,167 @@ class HostFacts {
         rows('pool_paths', 'POOL_PATH').each { if (it.size() == 2 && it[0]) { poolPaths[it[0]] = it[1] } }
         parseCerts()
         parseSmart()
+        parseHvmcli()
         parseVmPorts()
+        parseHostHealth()
+        parseVmActivity()
+        parsePatchExposure()
+        parseKernelPosture()
+        parseNetTiming()
+        parseSec()
+    }
+
+    /** @@patch_exposure: whether an automatic update can reach this host and restart the cluster stack. Absent on a quick check. */
+    private void parsePatchExposure() {
+        if (!sections.containsKey('patch_exposure')) {
+            return
+        }
+        Map<String, String> p = kv('patch_exposure')
+        uuInstalled = p.UU_INSTALLED == 'ii'
+        nrInstalled = p.NR_INSTALLED == 'ii'
+        uuPeriodic = p.UU_PERIODIC ?: null
+        uuTimer = p.UU_TIMER ?: null
+        aptUbuntuSources = int0(p.APT_UBUNTU)
+        nrListOnly = int0(p.NR_LISTONLY) > 0
+        nrClusterExempt = int0(p.NR_EXEMPT)
+        aptSourceFiles = (p.APT_SOURCES ?: '').tokenize(',')
+    }
+
+    /** @@kernel_posture: panic sysctls, taint, GFS2 mount error policy and PCIe AER. A value that could not be read stays absent, never a pass. */
+    private void parseKernelPosture() {
+        if (!sections.containsKey('kernel_posture')) {
+            return
+        }
+        rows('kernel_posture', 'SYSCTL').each { if (it.size() == 2 && lng(it[1]) != null) { panicSysctls[it[0]] = lng(it[1]) } }
+        Map<String, String> k = kv('kernel_posture')
+        taint = lng(k.TAINT)
+        gfs2MountOpts = rows('kernel_posture', 'GFS2_OPTS').findAll { it.size() == 2 && it[0] }.collect { [target: it[0], options: it[1]] }
+        aerFatal = lng(k.AER_FATAL)
+        aerNonfatal = lng(k.AER_NONFATAL)
+        aerCorrectable = lng(k.AER_CORRECTABLE)
+    }
+
+    /** @@net_timing: bond failover timing, link-flap counters and linux-bridge VLAN filtering. */
+    private void parseNetTiming() {
+        if (!sections.containsKey('net_timing')) {
+            return
+        }
+        bondTiming = rows('net_timing', 'BONDOPT').findAll { it.size() >= 8 && it[0] }.collect {
+            [name: it[0], mode: it[1] ?: null, miimon: lng(it[2]), updelay: lng(it[3]), downdelay: lng(it[4]), arpInterval: lng(it[5]), lacpRate: it[6] ?: null, hashPolicy: it[7] ?: null]
+        }
+        linkFlaps = rows('net_timing', 'FLAP').findAll { it.size() >= 2 && it[0] }.collect { [name: it[0], changes: lng(it[1]), downCount: lng(it.size() > 2 ? it[2] : null)] }
+        bridges = rows('net_timing', 'BRIDGE').findAll { it.size() >= 2 && it[0] }.collect { [name: it[0], vlanFiltering: it[1] ?: null, stpState: it.size() > 2 ? it[2] : null] }
+    }
+
+    /**
+     * A probe value that may carry a tenant-chosen name: control characters gone, '|' gone, length capped. The probe sanitizes names before they
+     * become fields, so this is the second line of that defence, for anything that reaches a view, an alarm or a report.
+     */
+    static String safeName(String s) {
+        if (s == null) {
+            return null
+        }
+        String t = s.replaceAll(/[\p{Cntrl}|]/, ' ').trim()
+        t.length() > 120 ? t.take(120) : t
+    }
+
+    private static Boolean nestedYes(String v) {
+        String t = v?.trim()
+        t ? (t in ['Y', 'y', '1'] ? Boolean.TRUE : (t in ['N', 'n', '0'] ? Boolean.FALSE : null)) : null
+    }
+
+    private void parseSec() {
+        if (!sections.containsKey('sec')) {
+            return
+        }
+        Map<String, String> m = kv('sec')
+        nestedIntel = nestedYes(m.KVM_NESTED_INTEL)
+        nestedAmd = nestedYes(m.KVM_NESTED_AMD)
+        smtControl = m.SMT_CONTROL ?: null
+        smtActive = m.SMT_ACTIVE ?: null
+        cpuCmdline = m.CPU_CMDLINE ?: null
+        secCut = m.SEC_CUT == '1'
+        rows('sec', 'CPU_VULN').each { if (it.size() >= 2 && it[0]) { cpuVulns[it[0]] = it[1] } }
+        rows('sec', 'INFRA_VLAN').each { if (it.size() >= 2 && it[1]?.isInteger()) { infraVlans << [role: it[0], vlan: it[1] as Integer] } }
+        rows('sec', 'BRIDGE_STP').each { if (it.size() >= 3 && it[0]) { secBridges << [bridge: it[0], stp: boolOrNull(it[1]), filtering: boolOrNull(it[2])] } }
+        rows('sec', 'VM_SEC').each { if (it.size() >= 5 && it[0]) { vmSec << vmSecOf(it) } }
+    }
+
+    private static Boolean boolOrNull(String v) {
+        v?.trim() == '1' ? Boolean.TRUE : (v?.trim() == '0' ? Boolean.FALSE : null)
+    }
+
+    /** One VM's effective CPU block, disk cache modes and limit flag, as the probe grepped them from its domain XML. */
+    private static Map vmSecOf(List<String> r) {
+        def mode = (r[1] ?: '') =~ /mode='([a-z-]+)'/
+        def vmx = (r[2] ?: '') =~ /policy='([a-z]+)'[^,]*name='vmx'|name='vmx'[^,]*policy='([a-z]+)'/
+        def svm = (r[2] ?: '') =~ /policy='([a-z]+)'[^,]*name='svm'|name='svm'[^,]*policy='([a-z]+)'/
+        [vm: safeName(r[0]), cpuMode: mode.find() ? mode.group(1) : null,
+         vmx: vmx.find() ? (vmx.group(1) ?: vmx.group(2)) : null, svm: svm.find() ? (svm.group(1) ?: svm.group(2)) : null,
+         caches: ((r[3] ?: '').findAll(/cache='([a-z]+)'/) { it[1] }).unique(), limited: r[4]?.trim() == '1']
+    }
+
+    private static BigDecimal dec(String v) { v?.trim()?.isBigDecimal() ? v.trim() as BigDecimal : null }
+
+    private void parseHostHealth() {
+        List<String> swap = rows('host_sample', 'SWAP_SAMPLE').find { it.size() == 2 }
+        Long swapIn = lng(swap?.getAt(0)), swapOut = lng(swap?.getAt(1))
+        swapPerSec = swapIn == null || swapOut == null ? null : (swapIn + swapOut) / 2G
+        List<String> cpu = rows('host_sample', 'CPU_SAMPLE').find { it.size() == 2 }
+        Long ticks = lng(cpu?.getAt(0)), steal = lng(cpu?.getAt(1))
+        stealPct = ticks && steal != null ? rate(steal * 100G, ticks, 1) : null
+        if (!sections.containsKey('host_health')) {
+            return
+        }
+        Map<String, String> h = kv('host_health')
+        psiCpu = dec(h.PSI_CPU)
+        psiMemory = dec(h.PSI_MEMORY)
+        oomRead = h.OOM_READ == '1'
+        vmLogsRead = h.VM_LOGS_READ == '1'
+        rootFsCut = h.ROOT_DF_CUT == '1'
+        oomKills = rows('host_health', 'OOM').findAll { it.size() >= 2 }.collect { List<String> r ->
+            String vm = scopeVm(r.size() > 2 ? r[2] : null)
+            [at: isoSeconds(r[0]), comm: r[1], vm: vm, qemu: vm != null || r[1] ==~ /(?i).*(qemu|kvm).*/]
+        }
+        vmCrashes = rows('host_health', 'VM_CRASH').findAll { it.size() >= 2 && it[0] }.collect { [vm: it[0], at: crashSeconds(it[1])] }
+        rootFs = rows('host_health', 'ROOT_DF').findAll { it.size() == 3 && it[0] }.collect { [target: it[0], pct: dec(it[1]), inodePct: dec(it[2])] }
+    }
+
+    /** The cgroup of a VM in the kernel's words: machine-qemu\x2d5\x2dvm\x2done.scope is vm-one, as libvirt spells it there, which can drop characters. */
+    static String scopeVm(String scope) {
+        def m = (scope ?: '') =~ /^machine-qemu\\x2d\d+\\x2d(.+)\.scope$/
+        m.find() ? m.group(1).replace('\\x2d', '-') : null
+    }
+
+    /** libvirt's "2026-10-30 12:34:56.789+0000: shutting down, reason=crashed". */
+    static Long crashSeconds(String line) {
+        def m = (line ?: '') =~ /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})(?:\.\d+)?([+-]\d{2}:?\d{2})/
+        m.find() ? isoSeconds("${m.group(1)}T${m.group(2)}${m.group(3)}".toString()) : null
+    }
+
+    private static BigDecimal rate(Number amount, Number per, int scale) {
+        (amount as BigDecimal).divide(per as BigDecimal, scale, java.math.RoundingMode.HALF_UP)
+    }
+
+    /** Two whole samples or nothing. A VM in one sample only, or whose counters went backwards because it restarted between them, has no rate. */
+    private void parseVmActivity() {
+        Long ms = lng(kv('busiest').BUSY_MS)
+        if (!ms || ms <= 0L) {
+            return
+        }
+        Closure<Map<String, List<Long>>> sample = { String key ->
+            rows('busiest', key).findAll { it.size() == 6 && it[0] && it.drop(1).every { String v -> lng(v) != null } }.collectEntries { [(it[0]): it.drop(1).collect { String v -> lng(v) }] }
+        }
+        Map<String, List<Long>> first = sample('BUSY_A')
+        BigDecimal secs = ms / 1000G
+        sample('BUSY_B').each { String vm, List<Long> b ->
+            List<Long> a = first[vm]
+            List<Long> d = a ? [b, a].transpose().collect { List<Long> p -> p[0] - p[1] } : null
+            if (d && d.every { it >= 0L }) {
+                vmActivity << [vm: vm, cpuPct: nproc > 0 ? rate(d[0] / 10000G, ms * nproc, 1) : null, readIops: rate(d[1], secs, 0), writeIops: rate(d[3], secs, 0),
+                               readMBs: rate(d[2] / 1000000G, secs, 1), writeMBs: rate(d[4] / 1000000G, secs, 1)]
+            }
+        }
     }
 
     /** corosync-quorumtool -s with a device adds a column: "1 1 A,V,NMW node1 (local)", or NR for not registered. */
@@ -325,6 +596,7 @@ class HostFacts {
         Map<String, String> s = kv('smart')
         smartctlPresent = s.containsKey('SMARTCTL') ? (s.SMARTCTL as boolean) : null
         Map<String, Map> disks = [:]
+        Map<String, Map> raid = [:]
         (sections.smart ?: []).each { String l ->
             if (l.startsWith('BOOT_DISK=')) {
                 disks[l.substring(10)] = [name: l.substring(10)]
@@ -333,7 +605,47 @@ class HostFacts {
                 if (d != null) { smartLine(d, l.substring(l.indexOf('|') + 1)) }
             }
         }
+        (sections.raid ?: []).each { String l ->
+            if (l.startsWith('RAID_DISK=')) {
+                // "megaraid,0@6": the slot as smartctl names it, on /dev/bus/6
+                List<String> p = l.substring(10).split('@', 2) as List<String>
+                raid[l.substring(10)] = [name: l.substring(10), slot: p[0], bus: p.size() > 1 ? p[1] : null]
+            } else if (l.startsWith('RAID_SMART=') && l.contains('|')) {
+                Map d = raid[l.substring(11, l.indexOf('|'))]
+                if (d != null) { smartLine(d, l.substring(l.indexOf('|') + 1)) }
+            }
+        }
+        rows('smart', 'BOOT_HOST').each { if (it.size() == 2 && it[1] && disks[it[0]]) { disks[it[0]].scsiHost = it[1] } }
         bootDisks = disks.values() as List
+        raidDisks = raid.values() as List
+        raidDisksUnread = int0(kv('raid').RAID_DISKS_UNREAD)
+    }
+
+    /** hvmcli health check --json, as the probe printed it on one line. Output of any other shape reads as unreadable, which is never a pass. */
+    private void parseHvmcli() {
+        hvmcliState = kv('hvmcli_health').HVMCLI_STATE
+        if (hvmcliState == 'read') {
+            hvmcliChecks = hvmcliRows(sections.hvmcli_health.find { it.startsWith('HVMCLI_JSON=') }?.substring(12))
+            hvmcliState = hvmcliChecks ? 'read' : 'unreadable'
+        }
+    }
+
+    /** One host's output must never reach the tab unbounded or break a check, so what is kept is cut to size here, and text only. A failure hvmcli admits to is not an answer. */
+    private static List<Map> hvmcliRows(String json) {
+        try {
+            Object o = new groovy.json.JsonSlurper().parseText(json)
+            Object rows = o instanceof Map && o.errorCode in [0, null] && o.data instanceof Map ? o.data.checks : null
+            rows instanceof List ? rows.findAll { it instanceof Map && it.check }.collect { Map c ->
+                [check: clip(c.check, 80), type: clip(c.type, 20), status: clip(c.status, 12).toUpperCase(), details: clip(c.details, 200)]
+            } : []
+        } catch (Exception | StackOverflowError ignored) {
+            []
+        }
+    }
+
+    private static String clip(Object v, int max) {
+        String s = v == null ? '' : v.toString().replaceAll(/\p{Cntrl}+/, ' ').trim()
+        s.length() > max ? s.take(max) + '...' : s
     }
 
     /** One line of smartctl -H -A -i, for ATA, SCSI or NVMe. The raw value of an attribute is its tenth column. */
@@ -345,6 +657,9 @@ class HostFacts {
         }
         def health = l =~ /^SMART (?:overall-health self-assessment test result|Health Status):\s+(.+?)\s*$/
         if (health.find()) { d.health = health.group(1) }
+        // ID NAME FLAG VALUE WORST THRESH TYPE UPDATED WHEN_FAILED RAW: "-" there is the normal answer
+        def row = l =~ /^\s*\d+\s+(\S+)\s+0x[0-9a-fA-F]+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(\S+)/
+        if (row.find() && row.group(2) != '-') { d.whenFailed = ((d.whenFailed ?: []) as List) + "${row.group(1)} (${row.group(2)})".toString() }
         def attr = l =~ /^\s*(5|197|198)\s+\S+\s+0x[0-9a-fA-F]+\s/
         if (attr.find()) {
             List<String> p = l.trim().split(/\s+/) as List<String>
@@ -361,6 +676,17 @@ class HostFacts {
         portsCut = kv('vm_ports').PORTS_CUT == '1'
         rows('vm_ports', 'OVS_PORT').findAll { it.size() >= 7 }.each { vmPorts << ovsPort(it) }
         rows('vm_ports', 'BR_PORT').findAll { it.size() >= 6 }.each { vmPorts << bridgePort(it) }
+        rows('vm_ports', 'PORT_SKIP').findAll { it.size() >= 4 }.each { vmPorts << skipPort(it) }
+    }
+
+    /**
+     * A macvtap (type direct, a Private network) or SR-IOV (type hostdev) port. It sits on no readable bridge, so its VLAN cannot be read here: it
+     * counts as not read, which the isolation checks report as NOT CHECKED rather than pass.
+     */
+    private static Map skipPort(List<String> r) {
+        String kind = r[3] == 'hostdev' ? 'sriov' : 'macvtap'
+        [vm: safeName(r[0]), dev: r[1], mac: r[2], bridge: null, kind: kind, read: false, access: null, tagged: [], all: false, untagged: false,
+         why: "${kind == 'sriov' ? 'SR-IOV passthrough' : 'macvtap (Private)'} port, which is on no bridge, so its VLAN cannot be read here".toString()]
     }
 
     /**
@@ -368,10 +694,14 @@ class HostFacts {
      * That last one is how 1.3 builds a port on an untagged network, so it stays its own case rather than reading as a trunk.
      */
     private static Map ovsPort(List<String> r) {
+        // Open vSwitch prints [] for a column with nothing set, so a blank is a read that timed out. Taken as unset, it would read as a port with no tag, which is a finding
+        if (r[4..6].any { !it?.trim() }) {
+            return [vm: safeName(r[0]), dev: r[1], mac: r[2], bridge: r[3], kind: 'ovs', read: false, why: 'could not read the port from Open vSwitch', access: null, tagged: [], all: false, untagged: false]
+        }
         Integer tag = r[4]?.trim()?.isInteger() ? r[4].trim() as Integer : null
         List<Integer> trunks = (r[5] ?: '').findAll(/\d+/).collect { it as Integer }
         String mode = r[6]?.trim() in ['[]', ''] ? null : r[6].trim().replace('"', '')
-        Map p = [vm: r[0], dev: r[1], mac: r[2], bridge: r[3], kind: 'ovs', read: true, access: null, tagged: [], all: false, untagged: false]
+        Map p = [vm: safeName(r[0]), dev: r[1], mac: r[2], bridge: r[3], kind: 'ovs', read: true, access: null, tagged: [], all: false, untagged: false]
         if (mode == 'trunk' || mode?.startsWith('native-')) {
             p.access = mode == 'trunk' ? null : tag
             p.tagged = trunks
@@ -388,7 +718,7 @@ class HostFacts {
 
     /** Linux bridge, from bridge -j vlan show. With vlan_filtering off the port's VLAN list means nothing: it reads 1 PVID whatever it carries. */
     private static Map bridgePort(List<String> r) {
-        Map p = [vm: r[0], dev: r[1], mac: r[2], bridge: r[3], kind: 'bridge', read: false, access: null, tagged: [], all: false, untagged: false]
+        Map p = [vm: safeName(r[0]), dev: r[1], mac: r[2], bridge: r[3], kind: 'bridge', read: false, access: null, tagged: [], all: false, untagged: false]
         if (r[4]?.trim() != '1') {
             p.why = r[3] ? "bridge ${r[3]} does not filter VLANs".toString() : 'port is on no bridge'
             return p
@@ -550,6 +880,74 @@ class HostFacts {
         }
     }
 
+    /**
+     * The agent's /quorum JSON and its .quorum-nodes file, both read defensively. HPE documents quorumAchieved, fenced, waitFencing,
+     * reachableNodes, totalNodes, corosyncActive, dlmActive and corosyncQuorate, and a nodes list of a shape only partly known, so any
+     * value that is missing or the wrong type stays null. The .quorum-nodes format is undocumented, so its tokens are extracted loosely.
+     */
+    private void parseAgentQuorum() {
+        Map<String, String> q = kv('agent_quorum')
+        Set<String> ids = [] as LinkedHashSet
+        String raw = q.AGENT_QUORUM
+        if (raw?.trim()) {
+            try {
+                Object o = new groovy.json.JsonSlurper().parseText(raw)
+                if (o instanceof Map) {
+                    Map j = o as Map
+                    agentQuorum = [achieved: asBool(j.quorumAchieved), fenced: asBool(j.fenced), waitFencing: asBool(j.waitFencing),
+                                   reachable: asInt(j.reachableNodes), total: asInt(j.totalNodes), corosyncActive: asBool(j.corosyncActive),
+                                   dlmActive: asBool(j.dlmActive), corosyncQuorate: asBool(j.corosyncQuorate)]
+                    ids.addAll(nodeTokens(j.nodes))
+                }
+            } catch (Exception | StackOverflowError ignored) {
+                agentQuorum = null
+            }
+        }
+        if (q.QUORUM_NODES?.trim()) {
+            ids.addAll(rawTokens(q.QUORUM_NODES))
+        }
+        agentQuorumNodes = ids as List<String>
+    }
+
+    private static Boolean asBool(Object v) {
+        v instanceof Boolean ? (Boolean) v : (v instanceof String && v.trim().toLowerCase() in ['true', 'false'] ? v.trim().toLowerCase() == 'true' : null)
+    }
+
+    private static Integer asInt(Object v) {
+        v instanceof Number ? (v as Integer) : (v instanceof String && v.trim().isInteger() ? v.trim() as Integer : null)
+    }
+
+    /** Lower-cased member identifiers from a JSON value of any shape: a list of names or of objects with a name/address/id field, or a map keyed by them. */
+    private static List<String> nodeTokens(Object v) {
+        List<String> out = []
+        if (v instanceof List) {
+            (v as List).each { Object n ->
+                if (n instanceof Map) {
+                    ['name', 'hostname', 'host', 'address', 'addr', 'ip', 'id', 'nodeId', 'nodeid'].each { String k -> if ((n as Map)[k] != null) { out << (n as Map)[k].toString() } }
+                } else if (n != null) {
+                    out << n.toString()
+                }
+            }
+        } else if (v instanceof Map) {
+            (v as Map).each { k, val -> if (val instanceof List || val instanceof Map) { out.addAll(nodeTokens(val)) } else { out << k.toString() } }
+        } else if (v != null) {
+            out << v.toString()
+        }
+        out.collect { it.trim().toLowerCase() }.findAll { it && it != 'null' }.unique()
+    }
+
+    /** The .quorum-nodes file as JSON if it parses, otherwise its host/address-like words. */
+    private static List<String> rawTokens(String s) {
+        try {
+            Object o = new groovy.json.JsonSlurper().parseText(s)
+            if (o instanceof List || o instanceof Map) {
+                return nodeTokens(o)
+            }
+        } catch (Exception ignored) {
+        }
+        (s.split(/[^A-Za-z0-9._:-]+/) as List<String>).findAll { it }.collect { it.toLowerCase() }.unique()
+    }
+
     /** corosync-cfgtool -s: a line per peer, "nodeid: N: connected" (or "disconnected"). */
     private void parseLinks(List<String> lines) {
         lines.each { String l ->
@@ -606,6 +1004,8 @@ class HostFacts {
             def f = l =~ /features='([^']*)'/
             if (f.find()) {
                 cur.features = f.group(1)
+                def w = l =~ /\bwp=(\S+)/
+                if (w.find()) { cur.wp = w.group(1) }
                 return
             }
             // a path that has vanished prints #:#:#:# for its address and #:# for its device numbers
@@ -615,6 +1015,51 @@ class HostFacts {
             }
         }
         maps = maps.findAll { !(it.vendor as String).startsWith('ATA') }   // local boot disks that multipath also lists
+    }
+
+    /** /sys/class/fc_host and fc_remote_ports. A null section means the probe did not look; an empty one means no Fibre Channel. */
+    private void parseFc(List<String> lines) {
+        if (lines == null) {
+            return
+        }
+        fcPresent = kv('fc').FC_PRESENT == '1'
+        rows('fc', 'FC_HOST').findAll { it.size() >= 8 }.each {
+            fcHosts << [host: it[0], portState: it[1], speed: it[2], portName: it[3],
+                        linkFailures: lng(it[4]) ?: 0L, lossOfSync: lng(it[5]) ?: 0L, lossOfSignal: lng(it[6]) ?: 0L, invalidCrc: lng(it[7]) ?: 0L]
+        }
+        rows('fc', 'FC_RPORT').findAll { it.size() >= 5 }.each {
+            fcRports << [rport: it[0], portState: it[1], roles: it[2], devLossTmo: lng(it[3]), fastIoFailTmo: lng(it[4])]
+        }
+    }
+
+    /** multipathd show paths format, pipe-joined by the probe. %A (TPG) and %k are only asked for, and present, on 0.14.3 (26.04). */
+    private void parseMpathPaths(List<String> lines) {
+        if (lines == null) {
+            return
+        }
+        mpathPathsExt = kv('mpath_paths').MPP_EXT == '1'
+        rows('mpath_paths', 'MPP').findAll { it.size() >= 4 }.each {
+            Map p = [wwid: it[0], dev: it[1], proto: normProto(it[2]), adapter: it[3]]
+            if (it.size() >= 6) {
+                p.tpg = it[4]
+                p.maxSectors = it[5]?.isInteger() ? it[5] as Integer : null
+            }
+            mpathPaths << p
+        }
+    }
+
+    /** multipathd prints protocol as scsi:iscsi, scsi:fcp, scsi:sas, nvme:tcp; reduce to the family word. */
+    private static String normProto(String p) {
+        String s = (p ?: '').toLowerCase()
+        s.contains('fcp') ? 'fcp' : (s.contains('iscsi') ? 'iscsi' : (s.contains('sas') ? 'sas' : (s.contains('nvme') ? 'nvme' : (s ?: null))))
+    }
+
+    private void parseIscsiTimers(List<String> lines) {
+        if (lines == null) {
+            return
+        }
+        rows('iscsi_timers', 'NODE_STARTUP').findAll { it.size() == 2 && it[0] }.each { iscsiNodes << [target: it[0], startup: it[1]] }
+        rows('iscsi_timers', 'RECOVERY_TMO').findAll { it.size() == 2 }.each { iscsiTmo << [session: it[0], recoveryTmo: (it[1]?.isInteger() ? it[1] as Integer : null)] }
     }
 
     /** True when any lockspace is stopped or in recovery: GFS2 I/O is blocked on this host. */
@@ -633,12 +1078,37 @@ class HostFacts {
      */
     List<Integer> getInferredWaits() {
         Closure<Set<Integer>> ids = { Object s -> ((s ?: '') as String).tokenize().findAll { it.isInteger() }.collect { it as Integer } as Set<Integer> }
-        lockspaces.findAll { (it.status as String)?.contains('wait fencing') }.collectMany { (ids(it.members) - ids(it.newMembers)) as List<Integer> }.unique().findAll { !(it in fenceWaits*.node) } as List<Integer>
+        List<Integer> diverged = divergedWaits
+        lockspaces.findAll { (it.status as String)?.contains('wait fencing') }.collectMany { (ids(it.members) - ids(it.newMembers)) as List<Integer> }.unique().findAll { !(it in fenceWaits*.node) && !(it in diverged) } as List<Integer>
+    }
+
+    /**
+     * The '-125' split state: a stopped lockspace waits to fence a node that dlm_controld is NOT fencing (no fence line) and whose daemon
+     * record shows a departed non-member (state X) whose fence time never caught up to its failure. From dlm 4.2.0 source a manual
+     * dlm_tool fence_ack is then refused with -125 (no need_fencing), so only a clean rejoin of the node clears it. Narrower than
+     * inferredWaits, which keeps a node with no such record (it may be a startup wait, where the acknowledgement works). Built from source,
+     * seen once in production (27 minutes) and not reproduced; 2.0 (dlm 4.3.0) behaviour here is unconfirmed.
+     */
+    List<Integer> getDivergedWaits() {
+        Closure<Set<Integer>> ids = { Object s -> ((s ?: '') as String).tokenize().findAll { it.isInteger() }.collect { it as Integer } as Set<Integer> }
+        lockspaces.findAll { (it.status as String)?.contains('wait fencing') }.collectMany { (ids(it.members) - ids(it.newMembers)) as List<Integer> }.unique().findAll { Integer n ->
+            !(n in fenceWaits*.node) && dlmNodes.any { it.node == n && (it.state as String) == 'X' && (it.fail as Long) > 0L && (it.fence as Long) < (it.fail as Long) }
+        } as List<Integer>
     }
 
     /** When the last GFS2 error was logged, in seconds, from the line's own stamp; null if it cannot be read. */
     Long getGfsErrorAt() {
-        def m = (gfsErrorLast ?: '') =~ /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:?\d{2})/
+        isoSeconds(gfsErrorLast)
+    }
+
+    /** When the last DLM conversion failure (-22) was logged, in seconds; null if it cannot be read. */
+    Long getDlmConvErrorAt() {
+        isoSeconds(dlmConvErrorLast)
+    }
+
+    /** A journalctl -o short-iso stamp at the start of a line, in seconds; null if it cannot be read. */
+    static Long isoSeconds(String line) {
+        def m = (line ?: '') =~ /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:?\d{2})/
         if (!m.find()) {
             return null
         }

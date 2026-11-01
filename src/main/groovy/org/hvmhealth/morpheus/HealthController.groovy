@@ -55,8 +55,14 @@ class HealthController implements PluginController {
                 Route.build('/hvm-health/time-source', 'timeSource', full),
                 Route.build('/hvm-health/preflight', 'preflight', read),
                 Route.build('/hvm-health/fleet', 'fleet', read),
+                Route.build('/hvm-health/monitor', 'monitor', read),
                 Route.build('/hvm-health/report', 'report', read),
+                Route.build('/hvm-health/fleet-insights', 'fleetInsights', read),
+                Route.build('/hvm-health/availability', 'availability', read),
+                Route.build('/hvm-health/availability-export', 'availabilityExport', read),
                 Route.build('/hvm-health/vlan-test', 'vlanTest', full),
+                Route.build('/hvm-health/window-start', 'windowStart', full),
+                Route.build('/hvm-health/window-end', 'windowEnd', full),
                 Route.build('/hvm-health/remove-host', 'removeHost', emergency),
                 Route.build('/hvm-health/fence-plan', 'fencePlan', emergency),
                 Route.build('/hvm-health/fence-ack', 'fenceAck', emergency),
@@ -159,9 +165,10 @@ class HealthController implements PluginController {
             Map last = HealthMonitor.LAST[ctx.cluster.id]
             ok([cluster: ctx.cluster.name, layout: ctx.layout().label, last: last, standards: standards, standardsError: standardsError,
                 allClustersUrl: Tenancy.isMaster(m.user?.account, Tenancy.loader(morpheus)) ? HealthAnalyticsProvider.PAGE_URL : null,
-                known: last ? null : FindingHistory.lastKnown(morpheus, ctx.cluster.id), historyError: FindingHistory.ERRORS[ctx.cluster.id],
+                known: last ? null : FindingHistory.lastKnown(morpheus, ctx.cluster.id), historyError: FindingHistory.ERRORS[ctx.cluster.id], standingBy: HealthMonitor.standingBy(),
                 canFix: canFix(m.user), canEmergency: canEmergency(m.user),
-                monitorMinutes: HealthMonitor.quickMinutes(s), fullHours: HealthMonitor.fullHours(s),
+                window: ChangeWindows.current(ctx.cluster.id), maxWindowHours: ChangeWindows.maxHours(s),
+                monitorMinutes: HealthMonitor.quickMinutes(s), fullHours: HealthMonitor.fullHours(s), watch: FreezeWatch.forCluster(ctx.cluster.id),
                 autoFixSafe: s.autoFixSafe in [true, 'true', 'on'], autoFixMaintenance: s.autoFixMaintenance in [true, 'true', 'on'],
                 autoFixNamed: HealthMonitor.autoFixNamed(s, ctx.cluster.id, ctx.cluster.name),
                 jobs: Jobs.forCluster(ctx.cluster.id).findAll { it.state == 'running' }.collect { it.toMap() }])
@@ -235,7 +242,84 @@ class HealthController implements PluginController {
             if (!Tenancy.isMaster(m.user?.account, Tenancy.loader(morpheus))) {
                 throw new SecurityException('The fleet view is for the master tenant.')
             }
-            ok(HealthMonitor.fleet(morpheus))
+            ok(HealthMonitor.fleet(morpheus).collect { [*:it, window: ChangeWindows.current(it.id as Long)] })
+        }
+    }
+
+    /** How the monitor itself is doing, for the all-clusters page: numbers, and why the status URL is not listening if it is not. */
+    def monitor(ViewModel<Map> m) {
+        guarded {
+            masterOnly(m, 'The fleet view')
+            ok(HealthMonitor.monitorState())
+        }
+    }
+
+    /** Holds this cluster's paging until the time given, or until ended: see ChangeWindows. Checks, alarms and history carry on. */
+    def windowStart(ViewModel<Map> m) {
+        guarded {
+            postOnly(m)
+            HealthContext ctx = operatorCtx(m)
+            ok(ChangeWindows.begin(morpheus, ctx.cluster, p(m).minutes, p(m).note as String, m.user, settings()))
+        }
+    }
+
+    def windowEnd(ViewModel<Map> m) {
+        guarded {
+            postOnly(m)
+            HealthContext ctx = operatorCtx(m)
+            ok([ended: ChangeWindows.end(morpheus, ctx.cluster, m.user)])
+        }
+    }
+
+    private void masterOnly(ViewModel<Map> m, String what) {
+        if (!Tenancy.isMaster(m.user?.account, Tenancy.loader(morpheus))) {
+            throw new SecurityException("${what} is for the master tenant.".toString())
+        }
+    }
+
+    /** Shared causes and each cluster's availability. Master tenant only: they name other tenants and clusters, and none of it reads a row per cluster. */
+    def fleetInsights(ViewModel<Map> m) {
+        guarded {
+            masterOnly(m, 'The fleet view')
+            Map shared = FleetCorrelator.current(settings().sharedRisk as String)
+            ok([shared: shared.shared, sharedError: shared.error, standingBy: HealthMonitor.standingBy(), availability: Availability.forFleet(morpheus, p(m).month as String)])
+        }
+    }
+
+    /** One cluster's figures, with the tenants on it, for that cluster's operators. */
+    def availability(ViewModel<Map> m) {
+        guarded {
+            HealthContext ctx = operatorCtx(m)
+            ok(Availability.forCluster(morpheus, ctx.cluster.id, p(m).month as String))
+        }
+    }
+
+    /**
+     * One tenant's figures, to hand to that customer, built in the browser from JSON as the report is. With a clusterId, for that cluster's operators and from that
+     * cluster alone; without one, for the master tenant and from every cluster. If the figures cannot be read this fails, rather than print a customer an empty record.
+     */
+    def availabilityExport(ViewModel<Map> m) {
+        guarded {
+            HealthContext ctx = p(m).clusterId != null ? operatorCtx(m) : null
+            if (!ctx) {
+                masterOnly(m, 'An export across clusters')
+            }
+            Object tenant = p(m).tenantId
+            if (!tenant?.toString()?.isLong()) {
+                throw new IllegalArgumentException('tenantId is required')
+            }
+            long now = System.currentTimeMillis()
+            String month = (p(m).month as String) ?: Availability.monthKey(now)
+            if (!(month ==~ /\d{4}-(0[1-9]|1[0-2])/)) {
+                throw new IllegalArgumentException('month must be like 2030-01')
+            }
+            Map<Long, Map> docs = ctx ? [(ctx.cluster.id): Availability.doc(morpheus, ctx.cluster.id, now)] : Availability.allDocs(morpheus, now)
+            Map r = Availability.tenantReport(docs, tenant as Long, month, now)
+            if (!r.clusters) {
+                return fail('No figures for that tenant in that month.', 404)
+            }
+            Audit.info(morpheus, m.user, ctx?.cluster, 'availability export generated', [tenantId: tenant, month: month])
+            ok(r)
         }
     }
 

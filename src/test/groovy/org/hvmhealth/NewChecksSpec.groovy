@@ -200,7 +200,7 @@ class NewChecksSpec extends Specification {
 
     def 'HCI Ceph is not judged on a heartbeat target'() {
         given:
-        HealthChecker.Input i = Fixture.input((1..3).collect { Fixture.host("hvm-node0${it}".toString(), Fixture.facts('probe-timesyncd', "hvm-node0${it}".toString())) }, 'mvm-1.3-ubuntu-24.04-morpheus-amd64')
+        HealthChecker.Input i = Fixture.input((1..3).collect { Fixture.host("hvm-node0${it}".toString(), Fixture.facts('probe-timesyncd', "hvm-node0${it}".toString())) }, 'mvm-1.3-ubuntu-24.04-ceph-hci-amd64')
 
         expect:
         ids(i, 'HA-05')[0].status == Status.NA
@@ -724,9 +724,28 @@ class NewChecksSpec extends Specification {
         ids(onFirst20("@@vm_ports\nPORTS_CUT=1"), 'NET-12')*.status == [Status.NOT_CHECKED]
     }
 
-    def 'ports are only read on a full check, and their answer stands between them'() {
+    def 'ports are read on every check now, and the slow full-check reads still stand between full checks'() {
         expect:
-        ['NET-12', 'NET-13', 'HW-07', 'HST-02', 'HST-03'].every { it in HealthMonitor.FULL_ONLY }
+        ['HW-07', 'HST-02', 'HST-03'].every { it in HealthMonitor.FULL_ONLY }
+        !('NET-12' in HealthMonitor.FULL_ONLY)
+        !('NET-13' in HealthMonitor.FULL_ONLY)
+    }
+
+    def 'a port whose Open vSwitch columns timed out is unread, not a port with no tag'() {
+        when:
+        List<HealthChecker.Result> rs = ids(ports('1.3', ovsPort('vm-one', MAC, ''), tenantVm(120)), 'NET-13')
+
+        then:
+        rs*.status == [Status.NOT_CHECKED]
+        rs[0].observed.contains('could not read')
+    }
+
+    def 'no VM read at all leaves both checks not checked, rather than no answer'() {
+        when:
+        List<HealthChecker.Result> rs = check(onFirst20("@@vm_ports\nPORTS_CUT=1"))
+
+        then:
+        rs.findAll { it.id in ['NET-12', 'NET-13'] }*.status == [Status.NOT_CHECKED, Status.NOT_CHECKED]
     }
 
     // trunks
@@ -853,6 +872,177 @@ class NewChecksSpec extends Specification {
         ids(Fixture.input([Fixture.host('hvm-node01', Fixture.facts('probe-healthy', 'hvm-node01', mfs('9216')))], Fixture.LAYOUT_20), 'NET-14') == []
     }
 
+    // ------------------------------------------------------------------ 0.4.0 host OS: patching, kernel posture, network timing (full check only)
+
+    def 'the new host-OS checks are full checks only'() {
+        expect:
+        ['PKG-04', 'KRN-01', 'KRN-02', 'KRN-03', 'NET-17', 'NET-18', 'NET-19'].every { it in HealthMonitor.FULL_ONLY }
+    }
+
+    @Unroll
+    def 'panic posture (KRN-01): #desc'() {
+        expect:
+        ids(onFirst20("@@kernel_posture\n${body}"), 'KRN-01')[0].status == status
+
+        where:
+        desc                                 | body                                                                                         | status
+        'all off passes'                     | 'SYSCTL=hung_task_panic|0\nSYSCTL=softlockup_panic|0\nSYSCTL=panic|0\nSYSCTL=panic_on_oops|1' | Status.PASS
+        'hung_task_panic set fails'          | 'SYSCTL=hung_task_panic|1\nSYSCTL=panic|0'                                                   | Status.FAIL
+        'softlockup_panic set warns'         | 'SYSCTL=hung_task_panic|0\nSYSCTL=softlockup_panic|1'                                         | Status.WARN
+        'kernel.panic over 0 warns'          | 'SYSCTL=hung_task_panic|0\nSYSCTL=panic|30'                                                  | Status.WARN
+        'errors=panic on a gfs2 mount warns' | 'SYSCTL=hung_task_panic|0\nGFS2_OPTS=/mnt/ds|rw,noatime,errors=panic'                         | Status.WARN
+        'unreadable sysctls are not checked' | 'SYSCTL=hung_task_panic|\nSYSCTL=panic|'                                                      | Status.NOT_CHECKED
+    }
+
+    def 'KRN-01 names the setting it fails on, and never offers to change it'() {
+        when:
+        HealthChecker.Result r = ids(onFirst20('@@kernel_posture\nSYSCTL=hung_task_panic|1'), 'KRN-01')[0]
+
+        then:
+        r.status == Status.FAIL
+        r.tier == HealthChecker.Tier.NONE
+        r.fix == null
+        r.hint.contains('hung_task_panic')
+        r.observed.contains('hung_task_panic=1')
+    }
+
+    @Unroll
+    def 'kernel taint (KRN-02): #desc'() {
+        expect:
+        ids(onFirst20("@@kernel_posture\nTAINT=${taint}"), 'KRN-02')[0].status == status
+
+        where:
+        desc                                      | taint   | status
+        'clean passes'                            | '0'     | Status.PASS
+        'a proprietary-module bit is ignored'     | '1'     | Status.PASS
+        'an oops or BUG fails'                    | '128'   | Status.FAIL
+        'a bad page fails'                        | '32'    | Status.FAIL
+        'a machine check warns'                   | '16'    | Status.WARN
+        'a soft lockup warns'                     | '16384' | Status.WARN
+        'an oops on top of a module bit fails'    | '129'   | Status.FAIL
+        'unreadable is not checked'               | ''      | Status.NOT_CHECKED
+    }
+
+    @Unroll
+    def 'PCIe AER (KRN-03): #desc'() {
+        expect:
+        ids(onFirst20("@@kernel_posture\n${body}"), 'KRN-03')[0].status == status
+
+        where:
+        desc                             | body                                             | status
+        'no errors passes'               | 'AER_FATAL=0\nAER_NONFATAL=0\nAER_CORRECTABLE=0' | Status.PASS
+        'a fatal error warns'            | 'AER_FATAL=2\nAER_NONFATAL=0\nAER_CORRECTABLE=0' | Status.WARN
+        'a non-fatal error warns'        | 'AER_FATAL=0\nAER_NONFATAL=1\nAER_CORRECTABLE=0' | Status.WARN
+        'correctable alone does not'     | 'AER_FATAL=0\nAER_NONFATAL=0\nAER_CORRECTABLE=9' | Status.PASS
+        'no counters are not checked'    | 'AER_FATAL=\nAER_NONFATAL=\nAER_CORRECTABLE='    | Status.NOT_CHECKED
+    }
+
+    def 'KRN-03 shows correctable errors as context without alarming'() {
+        when:
+        HealthChecker.Result r = ids(onFirst20('@@kernel_posture\nAER_FATAL=0\nAER_NONFATAL=0\nAER_CORRECTABLE=9'), 'KRN-03')[0]
+
+        then:
+        r.status == Status.PASS
+        r.observed.contains('correctable 9')
+    }
+
+    @Unroll
+    def 'bond timing (NET-17): #desc'() {
+        expect:
+        ids(onFirst20("@@net_timing\nBONDOPT=${line}"), 'NET-17')[0].status == status
+
+        where:
+        desc                                | line                                       | status
+        'fast 802.3ad passes'               | 'vs0bond|802.3ad|100|0|0|0|fast|layer3+4'  | Status.PASS
+        'slow LACP warns'                   | 'vs0bond|802.3ad|100|0|0|0|slow|layer3+4'  | Status.WARN
+        'no link monitoring warns'          | 'vs0bond|active-backup|0|0|0|0||'          | Status.WARN
+        'a round-robin mode warns'          | 'vs0bond|balance-rr|100|0|0|0||layer2'     | Status.WARN
+        'active-backup with miimon passes'  | 'vs0bond|active-backup|100|200|200|0||'    | Status.PASS
+    }
+
+    @Unroll
+    def 'link flap (NET-18): #desc'() {
+        expect:
+        ids(onFirst20("@@net_timing\nFLAP=${line}"), 'NET-18')[0].status == status
+
+        where:
+        // the healthy fixture has ~107 days uptime, so a per-hour rate needs a large count to cross the 5/hour default
+        desc                        | line               | status
+        'a steady link passes'      | 'eno1|5|0'         | Status.PASS
+        'a flapping link warns'     | 'eno1|50000|40000' | Status.WARN
+        'no counter is not checked' | 'eno1|'            | Status.NOT_CHECKED
+    }
+
+    @Unroll
+    def 'bridge VLAN filtering (NET-19): #desc'() {
+        expect:
+        ids(onFirst20("@@net_timing\nBRIDGE=${line}"), 'NET-19')*.status == status
+
+        where:
+        desc                        | line           | status
+        'filtering on passes'       | 'vmbr0|1|0'    | [Status.PASS]
+        'filtering off warns'       | 'vmbr0|0|0'    | [Status.WARN]
+        'per-VLAN bridge is a note'  | 'vmbr0.60|0|0' | [Status.NA]
+        'unreadable is not checked' | 'vmbr0||0'     | [Status.NOT_CHECKED]
+    }
+
+    def 'NET-19 is 2.0 only, so a 1.3 bridge raises nothing'() {
+        expect:
+        ids(onFirst13('@@net_timing\nBRIDGE=vmbr0|0|0'), 'NET-19') == []
+    }
+
+    private static String patchExposure(Map o) {
+        """@@patch_exposure
+UU_INSTALLED=${o.get('uu', 'ii')}
+NR_INSTALLED=${o.get('nr', 'ii')}
+UU_TIMER=${o.get('timer', 'enabled')}
+UU_PERIODIC=${o.get('periodic', '1')}
+APT_UBUNTU=${o.get('ubuntu', 3)}
+APT_SOURCES=00-local.sources,
+NR_LISTONLY=${o.get('listonly', 0)}
+NR_EXEMPT=${o.get('exempt', 0)}""".toString()
+    }
+
+    @Unroll
+    def 'auto-patch exposure (PKG-04): #desc'() {
+        expect:
+        ids(onFirst20(patchExposure(opts)), 'PKG-04')[0].status == status
+
+        where:
+        desc                                        | opts                     | status
+        'stock sources, u-u on, no exemption warns' | [:]                      | Status.WARN
+        'a non-daily (weekly) auto-upgrade warns'   | [periodic: '7']          | Status.WARN
+        'a needrestart list-only drop-in is safe'   | [listonly: 1]            | Status.PASS
+        'a cluster-stack exemption is safe'         | [exempt: 1]              | Status.PASS
+        'HVM sources only is safe'                  | [ubuntu: 0]              | Status.PASS
+        'unattended-upgrades off is safe'           | [periodic: '0']          | Status.PASS
+        'unattended-upgrades not installed is safe' | [uu: 'un', periodic: ''] | Status.PASS
+    }
+
+    def 'PKG-04 says which host type it found, and never changes the host'() {
+        when:
+        HealthChecker.Result warn = ids(onFirst20(patchExposure([:])), 'PKG-04')[0]
+        HealthChecker.Result safe = ids(onFirst20(patchExposure([exempt: 1])), 'PKG-04')[0]
+
+        then:
+        warn.status == Status.WARN
+        warn.tier == HealthChecker.Tier.NONE
+        warn.observed.contains('stock Ubuntu source')
+        safe.observed.contains('cluster stack exempt')
+    }
+
+    def 'the probe reads root space by explicit paths and never a bare df, and carries the new full-only sections'() {
+        given:
+        // comments aside (one of them names "bare df" and "df -x" to explain why the probe avoids them)
+        String cmds = new File('src/main/resources/scripts/health-probe.sh').getText('UTF-8').readLines().findAll { !it.trim().startsWith('#') }.join('\n')
+
+        expect:
+        cmds.contains('df --output=source,target,pcent,ipcent / /var /var/log /tmp /boot')
+        !cmds.contains('df -x')
+        cmds.findAll(/\bdf\b[^\n|]*/).every { it.contains('--output') }
+        ['patch_exposure', 'kernel_posture', 'net_timing'].every { cmds.contains('sec ' + it) }
+    }
+
     // ------------------------------------------------------------------ noise
 
     def 'a healthy cluster of either layout raises no alarm from any of these, with every section present and only real-host values'() {
@@ -886,5 +1076,122 @@ SMART=sdc|SMART support is: Unavailable - device lacks SMART capability."""
         !f.vmPorts && !f.bootDisks && !f.certs && !f.vmCpus && !f.poolPaths
         f.qdeviceRow == null && f.qdeviceState == null
         f.smartctlPresent == null && f.opensslPresent == null && f.qdeviceToolPresent == null
+    }
+
+    // ------------------------------------------------------------------ 0.4.0: all-paths-down shutdown (HB-02)
+
+    @Unroll
+    def 'HB-02 fails on any all-paths-down shutdown line, passes on none, is not checked when the journal could not be read'() {
+        when:
+        List<HealthChecker.Result> rs = ids(cluster20("@@apd\n${section}".toString()), 'HB-02')
+
+        then:
+        rs.size() == 3
+        rs*.status.every { it == status }
+        rs.every { it.severity == Severity.CRITICAL }
+
+        where:
+        section                                                                                                 | status
+        'APD_7D=1\nAPD_LAST=2026-11-01T02:00:00+0000 h morphd: Shutting down all VMs to protect data integrity'  | Status.FAIL
+        'APD_7D=0\nAPD_LAST='                                                                                    | Status.PASS
+        'APD_LAST='                                                                                              | Status.NOT_CHECKED
+    }
+
+    def 'HB-02 names the count and the last line, and points at what to do'() {
+        when:
+        HealthChecker.Result r = ids(cluster20('@@apd\nAPD_7D=2\nAPD_LAST=2026-11-01T02:00:00+0000 h morphd: Shutting down all VMs to protect data integrity'), 'HB-02').first()
+
+        then:
+        r.status == Status.FAIL
+        r.observed.contains('2 line(s)')
+        r.observed.contains('Shutting down all VMs to protect data integrity')
+        r.hint.contains('non-pinned VM')
+        r.source == 'hpe'
+    }
+
+    def 'HB-02 is full-only and needs the section: no row without it, and none on a quick probe'() {
+        given:
+        HealthChecker.Input quick = Fixture.input((1..3).collect { int n ->
+            String name = "hvm-node0${n}".toString()
+            Fixture.host(name, Fixture.facts('probe-healthy', name) { String t -> t.replace('MODE=full', 'MODE=quick').replace('@@end', '@@apd\nAPD_7D=1\nAPD_LAST=x\n@@end') })
+        }, Fixture.LAYOUT_20)
+
+        expect:
+        !check(Fixture.healthy()).any { it.id == 'HB-02' }
+        !check(quick).any { it.id == 'HB-02' }
+    }
+
+    // ------------------------------------------------------------------ 0.4.0: SCSI fence-agent defect (FEN-02)
+
+    def 'FEN-02 warns once, naming the hosts that carry the SCSI fence agent'() {
+        when:
+        List<HealthChecker.Result> rs = ids(cluster20('@@fence_agent\nFENCE_SCSI=1'), 'FEN-02')
+
+        then:
+        rs.size() == 1
+        rs[0].status == Status.WARN
+        rs[0].severity == Severity.HIGH
+        rs[0].host == null
+        rs[0].observed.contains('fence_scsi_hpevm')
+        rs[0].observed.contains('hvm-node01')
+        rs[0].hint.contains('a00156214')
+    }
+
+    def 'FEN-02 is silent when the agent is absent, or its section was not read'() {
+        expect:
+        !check(cluster20('@@fence_agent\nFENCE_SCSI=0')).any { it.id == 'FEN-02' }
+        !check(Fixture.healthy()).any { it.id == 'FEN-02' }
+    }
+
+    // ------------------------------------------------------------------ 0.4.0: ghost config_version (CLU-16)
+
+    private static HealthChecker.Input staleVersion(int which) {
+        Fixture.input((1..3).collect { int n ->
+            String name = "hvm-node0${n}".toString()
+            Fixture.host(name, Fixture.facts('probe-healthy', name) { String t -> n == which ? t.replace('config_version: 3', 'config_version: 2') : t })
+        }, Fixture.LAYOUT_20)
+    }
+
+    def 'CLU-16 warns and names the host that rejoined with an older config_version, while CLU-06 fails on the same difference'() {
+        when:
+        List<HealthChecker.Result> rs = check(staleVersion(1))
+        HealthChecker.Result r = rs.find { it.id == 'CLU-16' }
+
+        then:
+        r.status == Status.WARN
+        r.severity == Severity.HIGH
+        r.host == null
+        r.observed.contains('hvm-node01=v2')
+        r.observed.contains('v3')
+        r.hint.contains('ghost CPG member')
+        rs.find { it.id == 'CLU-06' }.status == Status.FAIL
+    }
+
+    def 'CLU-16 passes when every host is at the same config_version'() {
+        expect:
+        check(Fixture.healthy()).find { it.id == 'CLU-16' }.status == Status.PASS
+    }
+
+    // ------------------------------------------------------------------ 0.4.0: quiet on HCI Ceph, and ungathered facts stay empty
+
+    def 'HB-02 and FEN-02 stay quiet on an HCI Ceph cluster, even with both sections present'() {
+        given:
+        HealthChecker.Input i = Fixture.input((1..3).collect { int n ->
+            String name = "hvm-node0${n}".toString()
+            Fixture.host(name, Fixture.facts('probe-timesyncd', name) { String t -> t.replace('@@end', '@@fence_agent\nFENCE_SCSI=1\n@@apd\nAPD_7D=1\nAPD_LAST=x\n@@end') })
+        }, 'mvm-1.3-hci-ceph-ubuntu-24.04-morpheus-amd64')
+
+        expect:
+        i.layout.hciCeph
+        !check(i).any { it.id in ['HB-02', 'FEN-02'] }
+    }
+
+    def 'a probe with no apd or fence_agent section leaves those facts empty rather than a finding'() {
+        given:
+        HostFacts f = HostFacts.parse(Fixture.text('probe-healthy'))
+
+        expect:
+        f.apdSeen == null && f.apdLast == null && f.fenceScsiAgent == null
+        !f.sections.containsKey('apd') && !f.sections.containsKey('fence_agent')
     }
 }

@@ -1046,7 +1046,8 @@ END
 
         expect:
         p.contains('journalctl -t kernel --since \'7 days ago\'')
-        p.contains('exit "${PIPESTATUS[0]}")" && echo "GFS2_ERRORS_7D=')
+        p.contains('exit "${PIPESTATUS[0]}")" && GFS_LOG_READ=1')
+        p.contains('echo "GFS2_ERRORS_7D=')
     }
 
     // ------------------------------------------------------------------ scripts that change something, as written

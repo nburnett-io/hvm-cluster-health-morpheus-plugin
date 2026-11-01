@@ -110,7 +110,8 @@ class Preflight {
     /**
      * Before Morpheus is asked. Its own unmount has no limit and it carries on regardless: when one hung, its record went but the others kept
      * expecting the host, and a fence wait followed. Exit 3 means nothing changed. Exit 4 is an unmount refused, so that mount's pool is started again.
-     * Exit 6 is a hung unmount, which only a reboot clears, and its pool stays stopped: starting one would touch the hung mount.
+     * Exit 6 is a hung unmount: from kernel source the kernel's own wait is bounded at about 600 s (unconfirmed on a live host) and then
+     * completes and leaves cleanly, so a reboot rushed mid-unmount is the unclean departure that freezes the survivors; wait it out rather than reboot. Its pool stays stopped: starting one would touch the hung mount.
      */
     static String unmountScript() {
         Fixes.HEADER + '''mounts="$(awk '$3=="gfs2"{print $2}' /proc/mounts)"

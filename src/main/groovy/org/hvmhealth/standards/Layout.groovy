@@ -13,7 +13,7 @@ class Layout {
     String version
     String os
     boolean virtswitch
-    /** 1.3's other layout: Ceph instead of a shared LUN, so GFS2 and DLM checks do not apply as such. */
+    /** 1.3's other layout: Ceph instead of a shared LUN, so GFS2 and DLM checks do not apply as such. Only when the code says so: a code not recognised is read as GFS2, as skipping the freeze watch on a real GFS2 cluster costs far more than a few reads and findings on a Ceph one. */
     boolean hciCeph
 
     /** The layout code is the only source: "morpheus_version" in corosync.conf is a template version, 1.3 on 2.0 too. */
@@ -22,9 +22,8 @@ class Layout {
         def v = c =~ /(?:^|-)(?:mvm|hvm)-(\d+\.\d+)/
         def o = c =~ /ubuntu-(\d+\.\d+)/
         String version = v.find() ? v.group(1) : null
-        boolean std = c.contains('-std-')
         new Layout(code, version, o.find() ? o.group(1) : null, c.contains('virtswitch'),
-                version == '1.3' && c && !std)
+                version == '1.3' && (c =~ /(?i)(^|-)(hci|ceph)(-|$)/).find())
     }
 
     /** The profile key in {@link Standards}. */

@@ -127,6 +127,85 @@ class PagesSpec extends Specification {
         null    | 403
     }
 
+    def 'how the monitor itself is doing goes to the master tenant only, and holds no names'() {
+        given:
+        def c = new HealthController(new ClusterHealthPlugin(), morpheus('{"operatorTenants":"2,3"}'))
+
+        when:
+        def r = c.monitor(asUser(tenant, [:]))
+
+        then:
+        r.status == status
+        !JsonOutput.toJson(r.data).contains('cluster-x')
+
+        where:
+        tenant  | status
+        MASTER  | 200
+        ACME    | 403
+        INITECH | 403
+        null    | 403
+    }
+
+    def 'the page shows why the status URL is not listening, and the tab the real interval of the freeze watch'() {
+        given:
+        String pages = new File('src/assets/javascripts/health-pages.js').getText('UTF-8')
+        String tab = new File('src/assets/javascripts/health-tab.js').getText('UTF-8')
+
+        expect:
+        pages.contains("('monitor')")
+        pages.contains('m.statusError')
+        pages.contains('p.behind')
+        pages.contains('w.realSeconds')
+        tab.contains('s.watch.seconds')
+    }
+
+    def 'a long name cannot hold a table wider than its section, and a short word such as a status is not broken to make room'() {
+        given:
+        String hbs = new File('src/main/resources/renderer/hbs/healthTab.hbs').getText('UTF-8')
+        String tab = new File('src/assets/javascripts/health-tab.js').getText('UTF-8')
+        String pages = new File('src/assets/javascripts/health-pages.js').getText('UTF-8')
+
+        expect:
+        hbs =~ /\.hvm-health td \{[^}]*overflow-wrap: anywhere/
+        hbs =~ /\.hh-word \{[^}]*overflow-wrap: normal/
+        hbs =~ /\.hh-tier \{[^}]*overflow-wrap: normal/
+        pages.contains('.hh-page td, .hh-report td { overflow-wrap: anywhere; }')
+
+        and: 'in the Findings and Time rows'
+        tab.contains("el('span', { 'class': 'hh-nw hh-word st-' + r.status")
+        tab.contains("el('span', { 'class': 'hh-nw hh-word', text: r.severity })")
+        tab.contains("el('span', { 'class': 'hh-word', text: h.daemon || 'none' })")
+        tab.contains("'hh-word ' + (h.state === 'cluster source'")
+
+        and: 'a host stays breakable, as it is the long name'
+        tab.contains("el('span', { 'class': 'hh-nw', text: r.host || 'cluster' })")
+
+        and: 'colours that read on a light page and a dark one, with the dark red, green and slate gone'
+        ![hbs, pages].any { it.contains('#c62828') || it.contains('#2e7d32') || it.contains('#546e7a') }
+    }
+
+    def 'the tab is told the interval the freeze watch really has'() {
+        given:
+        MorpheusContext m = morpheus()
+        def c = new HealthController(new ClusterHealthPlugin(), m)
+
+        when: 'not running'
+        Map before = c.status(asUser(ACME)).data.data as Map
+
+        then:
+        before.watch == null
+
+        when:
+        HealthMonitor.start(m, new ClusterHealthPlugin())
+        HealthMonitor.sweep(m, new ClusterHealthPlugin(), HealthMonitor.@loadedAt - 60_000L)
+
+        then:
+        c.status(asUser(ACME)).data.data.watch == [seconds: 60L, setTo: 60L]
+
+        cleanup:
+        HealthMonitor.stop()
+    }
+
     def 'the fleet route needs the role permission'() {
         expect:
         new HealthController(null, null).routes.find { it.method == 'fleet' }.permissions*.code == [HealthController.PERM]

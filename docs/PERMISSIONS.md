@@ -13,17 +13,29 @@ A user needs **both**:
 | Permission | Access | Allows |
 |---|---|---|
 | Cluster Health | Read | The tab, checks, pre-flights, raw probe output |
-| Cluster Health | Full | Safe and maintenance fixes, VLAN tests, defining the cluster's time source |
+| Cluster Health | Full | Safe and maintenance fixes, VLAN tests, defining the cluster's time source, starting and ending a change window |
 | Cluster Health Emergency Actions | Full | Acknowledging a failed node as fenced; Remove safely |
 
 The all-clusters page (Operations > Analytics > Cluster Health) is for the master tenant only, whatever a role grants. Findings show which tenants are affected, which is why customers must never reach them. It needs the Cluster Health permission to show any rows, and the role's Analytics access for the menu entry to appear.
 
-The report on a cluster is for that cluster's operators, with Cluster Health Read. It can be handed on, so it holds no tenant data: who a finding affects and the names of tenants, VMs and networks are withheld. Host and storage names stay, so read it before it leaves.
+The report on a cluster is for that cluster's operators, with Cluster Health Read. It can be handed on, so it holds no tenant data: who a finding affects and the names of tenants, VMs and networks are withheld. Host and storage names stay, so read it before it leaves. A change window's reason and the Busiest VMs panel are left out as well.
+
+A finding's own observation can carry names too, so the report withholds it by allow-list: it is included only for checks known to name just hosts, storage, configuration and numbers, and withheld for every other check, including any added later. So the nested-virtualization (SEC-01), storage-VLAN (SEC-05) and per-VM-limit (SEC-06) findings, and cache=unsafe (VM-07), along with the ones that already name VMs, show no observation in a report, and a new check cannot leak by omission. Scrubbing known names stays on top, and the report still fails rather than leak when those names cannot be read.
+
+Who a finding reaches, with tenant names and counts, shows on the tab and in the alarm's text. Both are for operators: alarms go only to the tenants below. The Busiest VMs panel is on the tab only. A change window's user and reason show on the tab to anyone with Read there, and on the all-clusters page for the master tenant.
+
+The busiest VMs on a host, with their tenants, go to a cluster's operators with the rest of its check results, and are never in a report.
+
+Availability figures are for that cluster's operators, with Cluster Health Read, and list the tenants on the cluster, as findings do. A tenant's CSV is meant to leave: it holds that tenant's own figures and VMs, no other tenant, and no host, storage or cluster name, as a cluster goes by its id. An export across clusters, shared causes (FLT-01), and the all-clusters sections are for the master tenant only, whatever a role grants.
 
 Everyone else gets no tab, and every route refuses them. Morpheus answers 404 for a route the role lacks, and the plugin answers 403 to
 a non-operator whose role does have it, the same for a cluster that does not exist. A refusal goes to the appliance's log, not the audit log, whose entries land in the caller's tenant and would name the cluster.
 
-Fixes, VLAN tests, the time source, Remove safely and the acknowledgement answer POST only, so a link cannot run them: a GET carries no CSRF token.
+The **status URL**, off until a port is set, is the one thing with no login, because a URL monitor has no session. It gives whoever can reach the port only `OK`, `WARNING`, `CRITICAL`, `STALE` or `UNKNOWN`, the word `reloading`, and counts: never a host, cluster, tenant, VM or finding, with no way to list clusters. See [ALERTING.md](ALERTING.md), and limit the port to your monitor's addresses.
+
+How the monitor itself is doing, on the all-clusters page, is for the master tenant only, by the same rule as the page. It is numbers, and the name of the appliance node running the checks. A cluster's tab says only that another node runs them, as it goes to whoever owns the cluster.
+
+Fixes, VLAN tests, the time source, change windows, Remove safely and the acknowledgement answer POST only, so a link cannot run them: a GET carries no CSRF token.
 
 ## In a three-tier Morpheus
 

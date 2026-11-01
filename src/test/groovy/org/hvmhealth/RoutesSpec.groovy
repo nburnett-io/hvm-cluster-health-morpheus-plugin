@@ -7,6 +7,7 @@ import com.morpheusdata.model.ComputeServer
 import com.morpheusdata.model.ComputeServerGroup
 import com.morpheusdata.model.ComputeServerGroupType
 import com.morpheusdata.model.Network
+import com.morpheusdata.model.OperationData
 import com.morpheusdata.model.OperationNotification
 import com.morpheusdata.model.TaskResult
 import com.morpheusdata.model.User
@@ -16,12 +17,16 @@ import groovy.json.JsonOutput
 import io.reactivex.rxjava3.core.Single
 import org.hvmhealth.checks.CheckCatalog
 import org.hvmhealth.checks.HealthChecker
+import org.hvmhealth.morpheus.ChangeWindows
+import org.hvmhealth.morpheus.FreezeWatch
 import org.hvmhealth.morpheus.HealthContext
 import org.hvmhealth.morpheus.HealthController
 import org.hvmhealth.morpheus.HealthMonitor
 import org.hvmhealth.morpheus.HealthReport
 import org.hvmhealth.morpheus.HostOps
+import org.hvmhealth.morpheus.Incidents
 import org.hvmhealth.morpheus.Jobs
+import org.hvmhealth.morpheus.Paging
 import spock.lang.Specification
 import spock.lang.Unroll
 import spock.util.concurrent.PollingConditions
@@ -53,6 +58,12 @@ class RoutesSpec extends Specification {
     Closure<TaskResult> onScript = { String script -> new TaskResult(success: true, exitCode: '0', output: sample) }
     Closure<ServiceResponse> onRemove = { ServiceResponse.error('Morpheus says no') }
     Closure<List<Network>> onNetworks = { [] }
+    List<OperationData> stored = Collections.synchronizedList([])     // what the plugin keeps in Morpheus's data store
+    Closure<OperationData> onStore = { OperationData row -> row.id = 1000L + stored.size(); stored << row; row }
+    Closure<Boolean> onUnstore = { OperationData row -> stored.remove(row) }
+    Closure<List<OperationData>> onStoreList = { stored.toList() }
+    List<com.morpheusdata.core.data.DataQuery> alarmQueries = Collections.synchronizedList([])
+    Closure<List<OperationNotification>> onAlarmList = { com.morpheusdata.core.data.DataQuery q -> alarms }
 
     private static String decode(String command) {
         new String(command.find(/echo '([^']+)' \| base64/) { all, g -> g }.decodeBase64(), 'UTF-8')
@@ -79,9 +90,15 @@ class RoutesSpec extends Specification {
         }
         def admin = Stub(MorpheusServices.getMethod('getAdmin').returnType) { getAuditLog() >> auditLog }
         def notifications = Stub(MorpheusServices.getMethod('getOperationNotification').returnType) {
-            list(_) >> { self.alarms }
+            list(_) >> { args -> self.alarmQueries << args[0]; self.onAlarmList.call(args[0]) }
             createAlarm(_) >> { args -> self.created << args[0]; ServiceResponse.success() }
             clearAlarm(_) >> { args -> self.cleared << args[0]; ServiceResponse.success() }
+        }
+        def store = Stub(MorpheusServices.getMethod('getOperationData').returnType) {
+            list(_) >> { self.onStoreList.call() }
+            create(_) >> { args -> self.onStore.call(args[0]) }
+            get(_) >> { args -> self.stored.find { it.id == args[0] } }
+            remove(_) >> { args -> self.onUnstore.call(args[0]) }
         }
         def services = Stub(MorpheusServices) {
             getCluster() >> clusterService
@@ -89,6 +106,7 @@ class RoutesSpec extends Specification {
             getNetwork() >> networks
             getAdmin() >> admin
             getOperationNotification() >> notifications
+            getOperationData() >> store
         }
         Stub(MorpheusContext) {
             getServices() >> services
@@ -135,6 +153,8 @@ class RoutesSpec extends Specification {
     def cleanup() {
         HostOps.pollMs = 8000L
         HealthMonitor.stop()
+        ChangeWindows.stop()
+        HealthMonitor.uniqueIdFilterWorks = null
         clusters.each { HealthMonitor.LAST.remove(it.id) }
     }
 
@@ -146,7 +166,7 @@ class RoutesSpec extends Specification {
         def c = controller()
 
         when:
-        def r = c."${route}"(view(INITECH, verb, [host: 'hvm-node01', key: 'service-enable', nodeId: '1', confirm: 'hvm-node01', attest: 'on', servers: '192.0.2.1']))
+        def r = c."${route}"(view(INITECH, verb, [host: 'hvm-node01', key: 'service-enable', nodeId: '1', confirm: 'hvm-node01', attest: 'on', servers: '192.0.2.1', minutes: '60', note: 'planned']))
 
         then:
         r.status == 403
@@ -154,10 +174,12 @@ class RoutesSpec extends Specification {
         ran == []
         audited == []
         created == []
+        stored == []
+        !Paging.held(27L)
         Jobs.forCluster(27L).every { it.state != 'running' }
 
         where:
-        [route, verb] << [['status', 'catalog', 'check', 'raw', 'fix', 'timeSource', 'preflight', 'fleet', 'report', 'vlanTest', 'removeHost', 'fencePlan', 'fenceAck'], ['GET', 'POST']].combinations()
+        [route, verb] << [['status', 'catalog', 'check', 'raw', 'fix', 'timeSource', 'preflight', 'fleet', 'monitor', 'fleetInsights', 'availability', 'availabilityExport', 'report', 'vlanTest', 'windowStart', 'windowEnd', 'removeHost', 'fencePlan', 'fenceAck'], ['GET', 'POST']].combinations()
     }
 
     def 'an operator gets the catalog, which says nothing about the cluster and changes nothing'() {
@@ -210,16 +232,18 @@ class RoutesSpec extends Specification {
     @Unroll
     def 'an operator following a link does not reach #route: a GET has no CSRF token'() {
         when:
-        def r = controller()."${route}"(view(MASTER, 'GET', [host: 'hvm-node01', key: 'service-enable', nodeId: '1', confirm: 'hvm-node01', attest: 'on', servers: '192.0.2.1']))
+        def r = controller()."${route}"(view(MASTER, 'GET', [host: 'hvm-node01', key: 'service-enable', nodeId: '1', confirm: 'hvm-node01', attest: 'on', servers: '192.0.2.1', minutes: '60', note: 'planned']))
 
         then:
         r.status == 403
         ran == []
         audited == []
+        stored == []
+        !Paging.held(27L)
         !cluster.getConfigProperty(HealthContext.CFG_TIME_SOURCES)
 
         where:
-        route << ['fix', 'timeSource', 'vlanTest', 'removeHost', 'fenceAck']
+        route << ['fix', 'timeSource', 'vlanTest', 'removeHost', 'fenceAck', 'windowStart', 'windowEnd']
     }
 
     def 'a request Morpheus does not describe is refused too'() {
@@ -387,7 +411,7 @@ class RoutesSpec extends Specification {
         code | says
         '3'  | 'Nothing was changed'
         '4'  | 'its pool started again'
-        '6'  | 'clears a hung unmount'
+        '6'  | 'rush a reboot'
     }
 
     def 'with a typo in the confirmation nothing is touched'() {
@@ -479,6 +503,24 @@ class RoutesSpec extends Specification {
     }
 
     // ------------------------------------------------------------------ alarms
+
+    def 'a quick run judges isolation itself: a trunk seen once is a warning marked confirming, on a SECURITY alarm, with no audit'() {
+        given:
+        ComputeServerGroup own = new ComputeServerGroup(id: 2701L, name: 'cluster-y', owner: ACME, type: new ComputeServerGroupType(code: 'mvm-cluster'))
+        clusters = [own]
+        hosts = hosts.take(1)
+        sample = sample.replace('@@end', '@@vm_ports\nBR_PORT=vm-x|vnet0|02:00:00:00:00:09|hvmbr0|1|[{"ifname":"vnet0","vlans":[{"vlan":120,"flags":["PVID"]},{"vlan":300}]}]\n@@end')
+        MorpheusContext m = morpheus()
+
+        when:
+        Map view = HealthMonitor.run(m, new HealthContext(m, 2701L), [:], 'quick', false)
+        Map found = (view.results as List<Map>).find { it.id == 'NET-13' && it.status == 'WARN' }
+
+        then:
+        found.title == 'No unexpected trunk (confirming): vm-x'
+        created.find { it.name.startsWith('SECURITY: NET-13 ') }.status == 'warning'
+        !audited.any { it.contains('isolation finding confirmed') }
+    }
 
     private static HealthChecker.Result finding(String observed, HealthChecker.Status status = HealthChecker.Status.FAIL) {
         new HealthChecker.Result('MOR-03', 'Morpheus agent checking in', HealthChecker.Severity.HIGH, status, 'hvm-node01', observed, 'soon', 'plugin')
@@ -593,8 +635,8 @@ class RoutesSpec extends Specification {
         MorpheusContext m = morpheus()
         HealthMonitor.start(m, new ClusterHealthPlugin())
 
-        when:
-        HealthMonitor.sweep(m, new ClusterHealthPlugin())
+        when: 'a sweep after the cluster\'s turn has come'
+        HealthMonitor.sweep(m, new ClusterHealthPlugin(), System.currentTimeMillis() + 10 * 60_000L)
         new PollingConditions(timeout: 10).eventually { assert created.any { it.name.startsWith('PRB-03') } }
 
         then:
@@ -619,8 +661,10 @@ class RoutesSpec extends Specification {
         cleared*.uniqueId == [a.uniqueId]
     }
 
-    def 'at most four clusters are checked at once, the rest still get their turn, and none is queued twice'() {
+    def 'no more clusters than checkConcurrency are checked at once, the rest still get their turn, and none is queued twice'() {
         given:
+        settings = '{"checkConcurrency":"4"}'
+        long later = System.currentTimeMillis() + 10 * 60_000L   // the turn of every cluster has come
         clusters = (1..6).collect { new ComputeServerGroup(id: 500L + it, name: "cluster-${it}".toString(), owner: MASTER, type: new ComputeServerGroupType(code: 'mvm-cluster')) }
         hosts = hosts.take(1)
         CountDownLatch release = new CountDownLatch(1)
@@ -634,9 +678,9 @@ class RoutesSpec extends Specification {
         HealthMonitor.start(m, new ClusterHealthPlugin())
 
         when: 'all four checkers are held on a silent host, and the next pass comes round'
-        HealthMonitor.sweep(m, new ClusterHealthPlugin())
+        HealthMonitor.sweep(m, new ClusterHealthPlugin(), later)
         new PollingConditions(timeout: 10).eventually { assert started.get() == 4 }
-        HealthMonitor.sweep(m, new ClusterHealthPlugin())
+        HealthMonitor.sweep(m, new ClusterHealthPlugin(), later)
         Thread.sleep(300)
 
         then:
@@ -648,6 +692,853 @@ class RoutesSpec extends Specification {
         then:
         new PollingConditions(timeout: 20).eventually { assert clusters.every { HealthMonitor.LAST.containsKey(it.id) } }
         started.get() == 6
+    }
+
+    // ------------------------------------------------------------------ one alarm per incident, through the monitor
+
+    private static HealthChecker.Result net01(String host, HealthChecker.Status status = HealthChecker.Status.FAIL) {
+        new HealthChecker.Result('NET-01', 'Bond members up: bond0', HealthChecker.Severity.HIGH, status, host, 'eno1 down', 'up', 'plugin')
+    }
+
+    /** An open alarm as this build raised it, so it holds what its own message would say. */
+    private OperationNotification raised(List<HealthChecker.Result> rs) {
+        Map a = HealthMonitor.alarmsFor(27L, 'cluster-x', rs)[0]
+        new OperationNotification(uniqueId: a.uniqueId as String, status: a.status as String, statusMessage: a.message as String, active: true)
+    }
+
+    private HealthContext ownedByMaster() {
+        cluster.owner = MASTER
+        new HealthContext(morpheus(), 27L)
+    }
+
+    def 'a frozen cluster raises one alarm for the freeze, on the cluster, and lists every finding in the tab'() {
+        given:
+        frozenCluster()
+        cluster.owner = MASTER
+        MorpheusContext m = morpheus()
+
+        when:
+        Map view = HealthMonitor.run(m, new HealthContext(m, 27L), [:], 'quick', false)
+        List<OperationNotification> freeze = created.findAll { it.name.startsWith('DLM-01') }
+
+        then:
+        freeze.size() == 1
+        freeze[0].refType == 'computeServerGroup'
+        freeze[0].refId == 27L
+        freeze[0].status == 'error'
+        !created.any { it.name.startsWith('VM-02') }
+
+        and: 'the tab still has them, with the emergency action'
+        view.results.any { it.id == 'VM-02' && it.status == 'FAIL' }
+        view.results.any { it.id == 'DLM-01' && it.tier == 'EMERGENCY' }
+        view.incidents.find { it.key.startsWith('DLM-01') }.symptoms > 0
+    }
+
+    def 'when the freeze clears, its symptoms raise their own alarms, and the freeze goes'() {
+        given:
+        HealthContext ctx = ownedByMaster()
+        List<HealthChecker.Result> during = [new HealthChecker.Result('DLM-01', 'Lockspaces', HealthChecker.Severity.CRITICAL, HealthChecker.Status.FAIL, 'hvm-node01', 'o', 'e', 'p'), net01('hvm-node02'),
+                                             new HealthChecker.Result('MOR-03', 'Agent', HealthChecker.Severity.HIGH, HealthChecker.Status.FAIL, 'hvm-node02', 'o', 'e', 'p')]
+        alarms = [raised(during)]
+
+        when:
+        HealthMonitor.setAlarms(morpheus(), ctx, [during[2]])
+
+        then:
+        cleared*.uniqueId == [alarms[0].uniqueId]
+        created*.name == ['MOR-03 Agent']
+    }
+
+    def 'an acknowledged alarm is left alone across runs, while a symptom appears or a host clears'() {
+        given:
+        HealthContext ctx = ownedByMaster()
+        HealthChecker.Result freeze = new HealthChecker.Result('DLM-01', 'Lockspaces', HealthChecker.Severity.CRITICAL, HealthChecker.Status.FAIL, 'hvm-node01', 'o', 'e', 'p')
+        HealthChecker.Result freeze2 = new HealthChecker.Result('DLM-01', 'Lockspaces', HealthChecker.Severity.CRITICAL, HealthChecker.Status.FAIL, 'hvm-node02', 'o', 'e', 'p')
+        OperationNotification open = raised([freeze, freeze2])
+        open.acknowledged = true
+        alarms = [open]
+
+        when:
+        HealthMonitor.setAlarms(morpheus(), ctx, [freeze, freeze2])
+        HealthMonitor.setAlarms(morpheus(), ctx, [freeze])
+        HealthMonitor.setAlarms(morpheus(), ctx, [freeze, new HealthChecker.Result('VM-02', 'Stuck', HealthChecker.Severity.CRITICAL, HealthChecker.Status.FAIL, 'hvm-node01', 'o', 'e', 'p')])
+
+        then:
+        cleared == []
+        created == []
+    }
+
+    def 'a check that spreads to a host the alarm does not name raises it again, under the same identity, naming both'() {
+        given:
+        HealthContext ctx = ownedByMaster()
+        OperationNotification open = raised([net01('hvm-node01')])
+        open.acknowledged = true
+        alarms = [open]
+
+        when:
+        HealthMonitor.setAlarms(morpheus(), ctx, [net01('hvm-node01'), net01('hvm-node02')])
+
+        then:
+        cleared*.uniqueId == [open.uniqueId]
+        created*.uniqueId == [open.uniqueId]
+        created[0].statusMessage.startsWith('cluster-x / hvm-node01, hvm-node02: ')
+        created[0].refType == 'computeServerGroup'
+    }
+
+    def 'raised again, it keeps its start, and says it had been acknowledged and by whom, in the words that still end the message'() {
+        given:
+        HealthContext ctx = ownedByMaster()
+        Date first = new Date(1_800_000_000_000L)
+        OperationNotification open = raised([net01('hvm-node01')])
+        open.acknowledged = true
+        open.acknowledgedByUser = 'someone'
+        open.startDate = first
+        alarms = [open]
+
+        when:
+        HealthMonitor.setAlarms(morpheus(), ctx, [net01('hvm-node01'), net01('hvm-node02')])
+
+        then:
+        created[0].startDate == first
+        created[0].statusMessage.contains('Acknowledged earlier by someone, before this changed.')
+        created[0].statusMessage.endsWith(Incidents.ALARM_TAIL)
+        created[0].acknowledged == false
+    }
+
+    def 'one nobody acknowledged says nothing about that'() {
+        given:
+        HealthContext ctx = ownedByMaster()
+        OperationNotification open = raised([net01('hvm-node01')])
+        alarms = [open]
+
+        when:
+        HealthMonitor.setAlarms(morpheus(), ctx, [net01('hvm-node01'), net01('hvm-node02')])
+
+        then:
+        !created[0].statusMessage.contains('Acknowledged')
+    }
+
+    def 'a symptom that appears after the alarm was raised gets into its text if nobody has acknowledged it, keeping its start, and then it stays'() {
+        given:
+        HealthContext ctx = ownedByMaster()
+        Date first = new Date(1_800_000_000_000L)
+        HealthChecker.Result freeze = new HealthChecker.Result('DLM-01', 'Lockspaces', HealthChecker.Severity.CRITICAL, HealthChecker.Status.FAIL, 'hvm-node01', 'o', 'e', 'p')
+        HealthChecker.Result stuck = new HealthChecker.Result('VM-02', 'Stuck', HealthChecker.Severity.CRITICAL, HealthChecker.Status.FAIL, 'hvm-node01', 'o', 'e', 'p')
+        HealthChecker.Result silent = new HealthChecker.Result('PRB-01', 'Answers', HealthChecker.Severity.HIGH, HealthChecker.Status.FAIL, 'hvm-node03', 'o', 'e', 'p')
+        OperationNotification open = raised([freeze])
+        open.startDate = first
+        alarms = [open]
+
+        when:
+        HealthMonitor.setAlarms(morpheus(), ctx, [freeze, stuck])
+
+        then:
+        cleared*.uniqueId == [open.uniqueId]
+        created.size() == 1
+        created[0].statusMessage.contains('Also explains 1 related finding: VM-02')
+        created[0].startDate == first
+
+        when: 'the same again: it is named now, so nothing changes'
+        alarms = [created[0]]
+        cleared.clear()
+        created.clear()
+        HealthMonitor.setAlarms(morpheus(), ctx, [freeze, stuck])
+
+        then:
+        cleared == []
+        created == []
+
+        when: 'a symptom on a host the text does not name yet'
+        HealthMonitor.setAlarms(morpheus(), ctx, [freeze, stuck, silent])
+
+        then:
+        created.size() == 1
+        created[0].statusMessage.contains('PRB-01')
+        created[0].statusMessage.contains('hvm-node03')
+    }
+
+    def 'a message cut short does not raise itself again for a symptom either'() {
+        given:
+        HealthContext ctx = ownedByMaster()
+        HealthChecker.Result freeze = new HealthChecker.Result('DLM-01', 'Lockspaces', HealthChecker.Severity.CRITICAL, HealthChecker.Status.FAIL, 'hvm-node01', 'o', 'e', 'p')
+        HealthChecker.Result stuck = new HealthChecker.Result('VM-02', 'Stuck', HealthChecker.Severity.CRITICAL, HealthChecker.Status.FAIL, 'hvm-node01', 'o', 'e', 'p')
+        OperationNotification open = raised([freeze])
+        open.statusMessage = open.statusMessage.take(20)
+        alarms = [open]
+
+        when:
+        HealthMonitor.setAlarms(morpheus(), ctx, [freeze, stuck])
+
+        then:
+        created == []
+    }
+
+    private static HealthChecker.Result fullOnly(String host) {
+        new HealthChecker.Result('HW-07', 'Boot disk healthy (SMART): sda', HealthChecker.Severity.HIGH, HealthChecker.Status.FAIL, host, 'FAILED', 'healthy', 'plugin')
+    }
+
+    def 'with no full check since the load, a quick check cannot clear what only a full one can judge, in either copy, and once one has run it can'() {
+        given:
+        HealthContext ctx = new HealthContext(morpheus(), 27L)
+        OperationNotification tenants = raised([fullOnly('hvm-node01')])
+        OperationNotification master = raised([fullOnly('hvm-node01')])
+        master.uniqueId = "${master.uniqueId}-master".toString()
+        OperationNotification quick = raised([net01('hvm-node01')])
+        alarms = [tenants, master, quick]
+        HealthMonitor.@LAST_FULL.remove(27L)
+
+        when:
+        HealthMonitor.setAlarms(morpheus(), ctx, [])
+
+        then: 'what a quick check does judge still clears'
+        cleared == [quick]
+
+        when:
+        alarms = [tenants, master]
+        cleared.clear()
+        HealthMonitor.@LAST_FULL[27L] = []
+        HealthMonitor.setAlarms(morpheus(), ctx, [])
+
+        then:
+        cleared as Set == [tenants, master] as Set
+
+        cleanup:
+        HealthMonitor.@LAST_FULL.remove(27L)
+    }
+
+    private HealthChecker.Input withPorts(Map<String, Map> facts) {
+        Fixture.input(hosts.collect { new HealthChecker.Host(it.name, false, 'online', null, null, new org.hvmhealth.model.HostFacts([complete: true] + (facts[it.name] ?: [:]))) }, Fixture.LAYOUT_20)
+    }
+
+    private static HealthChecker.Result trunk(String host) {
+        new HealthChecker.Result('NET-13', 'No unexpected trunk: vm-one', HealthChecker.Severity.CRITICAL, HealthChecker.Status.FAIL, host, 'o', 'e', 'plugin')
+    }
+
+    def 'after a reload an isolation alarm on a host whose ports were not read stays, though the host answered, and clears once they are read'() {
+        given:
+        HealthContext ctx = ownedByMaster()
+        OperationNotification open = raised([trunk('hvm-node02')])
+        alarms = [open]
+
+        when: 'cut short, on the first run after the load: nothing in memory holds the finding'
+        HealthMonitor.setAlarms(morpheus(), ctx, [], false, withPorts(('hvm-node01'): [sections: [vm_ports: []]], ('hvm-node02'): [sections: [vm_ports: []], portsCut: true], ('hvm-node03'): [sections: [vm_ports: []]]))
+
+        then:
+        cleared == []
+
+        when: 'read whole, and the finding has gone'
+        HealthMonitor.setAlarms(morpheus(), ctx, [], false, withPorts(('hvm-node01'): [sections: [vm_ports: []]], ('hvm-node02'): [sections: [vm_ports: []]], ('hvm-node03'): [sections: [vm_ports: []]]))
+
+        then:
+        cleared == [open]
+    }
+
+    def 'it does not hold any other alarm, or an isolation alarm on a host that was read'() {
+        given:
+        HealthContext ctx = ownedByMaster()
+        OperationNotification net = raised([net01('hvm-node02')])
+        OperationNotification other = raised([trunk('hvm-node01')])
+        alarms = [net, other]
+
+        when:
+        HealthMonitor.setAlarms(morpheus(), ctx, [], false, withPorts(('hvm-node01'): [sections: [vm_ports: []]], ('hvm-node02'): [sections: [vm_ports: []], portsCut: true], ('hvm-node03'): [sections: [vm_ports: []]]))
+
+        then:
+        cleared as Set == [net, other] as Set
+    }
+
+    def 'both copies of an alarm follow the same rule'() {
+        given:
+        HealthContext ctx = new HealthContext(morpheus(), 27L)   // owned by a tenant, so the master tenant has its own
+        OperationNotification tenants = raised([net01('hvm-node01')])
+        OperationNotification master = raised([net01('hvm-node01')])
+        master.uniqueId = "${master.uniqueId}-master".toString()
+        alarms = [tenants, master]
+
+        when:
+        HealthMonitor.setAlarms(morpheus(), ctx, [net01('hvm-node01'), net01('hvm-node02')])
+
+        then:
+        cleared.size() == 2
+        created.size() == 2
+        created*.uniqueId as Set == [tenants.uniqueId, master.uniqueId] as Set
+    }
+
+    def 'an alarm from before grouping is replaced by the group on the first run, and a cluster-wide one keeps its identity'() {
+        given:
+        HealthContext ctx = ownedByMaster()
+        String oldKey = 'NET-01|hvm-node01|Bond members up: bond0'.digest('MD5').take(12)
+        OperationNotification old = new OperationNotification(uniqueId: "hvm-cluster-health-27-NET-01-${oldKey}".toString(), status: 'error', statusMessage: 'as it was', active: true)
+        HealthChecker.Result wide = new HealthChecker.Result('STO-05', 'Paths', HealthChecker.Severity.MEDIUM, HealthChecker.Status.WARN, null, 'o', 'e', 'p')
+        OperationNotification keeps = raised([wide])
+        alarms = [old, keeps]
+
+        when:
+        HealthMonitor.setAlarms(morpheus(), ctx, [net01('hvm-node01'), wide])
+
+        then:
+        cleared == [old]
+        created*.name == ['NET-01 Bond members up: bond0']
+    }
+
+    private HealthChecker.Input withSilent(String host) {
+        Fixture.input(hosts.collect { new HealthChecker.Host(it.name, false, 'online', null, null, it.name == host ? new org.hvmhealth.model.HostFacts() : new org.hvmhealth.model.HostFacts(complete: true)) }, Fixture.LAYOUT_20)
+    }
+
+    def 'an alarm naming a host that did not answer stays: that says nothing about the finding'() {
+        given:
+        HealthContext ctx = ownedByMaster()
+        OperationNotification open = raised([net01('hvm-node02')])
+        open.acknowledged = true
+        alarms = [open]
+
+        when:
+        HealthMonitor.setAlarms(morpheus(), ctx, [], false, withSilent('hvm-node02'))
+
+        then:
+        cleared == []
+
+        when: 'it answers, and the finding has gone'
+        HealthMonitor.setAlarms(morpheus(), ctx, [], false, withSilent(null))
+
+        then:
+        cleared == [open]
+    }
+
+    def 'an alarm on a host that did answer still clears when another host is silent'() {
+        given:
+        HealthContext ctx = ownedByMaster()
+        OperationNotification open = raised([net01('hvm-node02')])
+        alarms = [open]
+
+        when:
+        HealthMonitor.setAlarms(morpheus(), ctx, [], false, withSilent('hvm-node03'))
+
+        then:
+        cleared == [open]
+    }
+
+    def 'one cluster never clears another: a longer id the filter also matches is left alone'() {
+        given:
+        HealthContext ctx = ownedByMaster()
+        OperationNotification other = new OperationNotification(uniqueId: 'hvm-cluster-health-271-NET-01-abc', status: 'error', active: true)
+        OperationNotification mine = new OperationNotification(uniqueId: 'hvm-cluster-health-27-NET-01-abc', status: 'error', active: true)
+        alarms = [other, mine]
+
+        when:
+        HealthMonitor.setAlarms(morpheus(), ctx, [])
+
+        then:
+        cleared == [mine]
+    }
+
+    // ------------------------------------------------------------------ listing alarms at scale
+
+    /** What Morpheus would do with the filter if ':' means "contains". */
+    private List<OperationNotification> honouringFilter(com.morpheusdata.core.data.DataQuery q) {
+        def f = q.filters.find { it.name == 'uniqueId' }
+        f ? alarms.findAll { it.uniqueId.contains(f.value as String) } : alarms
+    }
+
+    def 'with 200 clusters, each lists its own alarms once the filter is shown to work, not every alarm on the appliance'() {
+        given:
+        clusters = (1000L..1199L).collect { new ComputeServerGroup(id: it, name: "cluster-${it}".toString(), owner: MASTER, type: new ComputeServerGroupType(code: 'mvm-cluster')) }
+        alarms = clusters.collectMany { c -> (1..3).collect { new OperationNotification(uniqueId: "hvm-cluster-health-${c.id}-NET-0${it}-abc".toString(), status: 'error', active: true) } }
+        int rowsRead = 0
+        onAlarmList = { com.morpheusdata.core.data.DataQuery q -> List<OperationNotification> found = honouringFilter(q); rowsRead += found.size(); found }
+        MorpheusContext m = morpheus()
+
+        when:
+        clusters.each { c -> HealthMonitor.setAlarms(m, new HealthContext(m, c.id), []) }
+
+        then: 'quadratic would have been 120,000 rows'
+        rowsRead < 2000
+        alarmQueries.count { q -> !q.filters.any { it.name == 'uniqueId' } } == 1
+        cleared.size() == alarms.size()
+    }
+
+    def 'a filter that loses an open alarm is not trusted, so nothing is raised twice'() {
+        given:
+        HealthContext ctx = ownedByMaster()
+        alarms = [raised([net01('hvm-node01')])]
+        onAlarmList = { com.morpheusdata.core.data.DataQuery q -> q.filters.any { it.name == 'uniqueId' } ? [] : alarms }
+        MorpheusContext m = morpheus()
+
+        when:
+        3.times { HealthMonitor.setAlarms(m, new HealthContext(m, 27L), [net01('hvm-node01')]) }
+
+        then:
+        created == []
+        cleared == []
+        HealthMonitor.uniqueIdFilterWorks == false
+        alarmQueries.count { q -> q.filters.any { it.name == 'uniqueId' } } == 1
+    }
+
+    def 'a filter Morpheus refuses is not trusted either, and alarms carry on'() {
+        given:
+        ownedByMaster()
+        alarms = [raised([net01('hvm-node01')])]
+        onAlarmList = { com.morpheusdata.core.data.DataQuery q ->
+            if (q.filters.any { it.name == 'uniqueId' }) {
+                throw new IllegalArgumentException('no such operator')
+            }
+            alarms
+        }
+        MorpheusContext m = morpheus()
+
+        when:
+        HealthMonitor.setAlarms(m, new HealthContext(m, 27L), [net01('hvm-node01'), net01('hvm-node02')])
+
+        then:
+        HealthMonitor.uniqueIdFilterWorks == false
+        created.size() == 1
+    }
+
+    def 'with nothing open the filter proves nothing, so it is not yet trusted, and the alarm is raised once'() {
+        given:
+        HealthContext ctx = ownedByMaster()
+        onAlarmList = { com.morpheusdata.core.data.DataQuery q -> q.filters.any { it.name == 'uniqueId' } ? [] : alarms }
+
+        when:
+        HealthMonitor.setAlarms(morpheus(), ctx, [net01('hvm-node01')])
+
+        then:
+        HealthMonitor.uniqueIdFilterWorks == null
+        created.size() == 1
+        alarmQueries.every { q -> !q.filters.any { it.name == 'uniqueId' } }
+    }
+
+    // ------------------------------------------------------------------ change windows
+
+    private static final Map START = [minutes: '60', note: 'firmware on the hosts']
+
+    private List<OperationData> windowRows() {
+        stored.findAll { it.category == ChangeWindows.CATEGORY }
+    }
+
+    def 'the window routes need full access, like a fix'() {
+        given:
+        def routes = new HealthController(null, null).routes
+        Closure access = { String method -> routes.find { it.method == method }.permissions.collect { [it.code, it.availableAccessTypes] } }
+
+        expect:
+        access('windowStart') == access('fix')
+        access('windowEnd') == access('fix')
+        routes.find { it.method == 'windowStart' }.url == '/hvm-health/window-start'
+        routes.find { it.method == 'windowEnd' }.url == '/hvm-health/window-end'
+    }
+
+    def 'an operator starts a window: it holds paging, says who and why, and is audited and stored'() {
+        when:
+        long before = System.currentTimeMillis()
+        def r = controller().windowStart(view(ACME, 'POST', START))
+        Map w = r.data.data as Map
+
+        then:
+        r.status == 200
+        w.by == 'someone'
+        w.note == 'firmware on the hosts'
+        (w.endsAt as long) >= before + 3_600_000L
+        (w.endsAt as long) <= System.currentTimeMillis() + 3_600_000L
+        Paging.held(27L)
+        !Paging.held(28L)
+        windowRows().size() == 1
+        windowRows()[0].refId == '27'
+        audited.any { it.contains('change window started') && it.contains('firmware on the hosts') && it.contains('cluster-x') }
+
+        and: 'the tab is told'
+        controller().status(view(ACME, 'GET')).data.data.window.note == 'firmware on the hosts'
+        controller().status(view(ACME, 'GET')).data.data.maxWindowHours == 24
+    }
+
+    def 'with no window the tab is told that too'() {
+        expect:
+        controller().status(view(ACME, 'GET')).data.data.window == null
+    }
+
+    def 'a window needs an end and a reason, and nothing is started without them'() {
+        when:
+        def r = controller().windowStart(view(ACME, 'POST', params))
+
+        then:
+        r.status == 400
+        r.data.msg
+        windowRows() == []
+        !Paging.held(27L)
+        audited == []
+
+        where:
+        params << [[note: 'x'], [minutes: '', note: 'x'], [minutes: '0', note: 'x'], [minutes: '-5', note: 'x'], [minutes: 'soon', note: 'x'], [minutes: '1.5', note: 'x'], [minutes: '1441', note: 'x'],
+                   [minutes: '99999999999', note: 'x'], [minutes: '60'], [minutes: '60', note: '   '], [minutes: '60', note: 'x' * 201]]
+    }
+
+    def 'the longest window follows the setting, and a setting that makes no sense leaves the default'() {
+        given:
+        settings = JsonOutput.toJson([maxWindowHours: setting])
+
+        expect:
+        controller().windowStart(view(ACME, 'POST', [minutes: minutes, note: 'x'])).status == status
+
+        where:
+        setting | minutes | status
+        '2'     | '120'   | 200
+        '2'     | '121'   | 400
+        '0'     | '1440'  | 200
+        '0'     | '1441'  | 400
+        '-1'    | '1441'  | 400
+        'lots'  | '1441'  | 400
+    }
+
+    def 'a window the store did not take is refused, rather than vanish at the next reload'() {
+        given:
+        onStore = store
+
+        when:
+        def r = controller().windowStart(view(ACME, 'POST', START))
+
+        then:
+        r.status == 400
+        r.data.msg.contains('paging is not held')
+        !Paging.held(27L)
+        audited == []
+
+        where:
+        store << [{ OperationData row -> row }, { OperationData row -> row.id = 5L; null }, { OperationData row -> row.id = 77L; row }]
+    }
+
+    def 'a new window replaces the open one, which goes from the store'() {
+        given:
+        def c = controller()
+        c.windowStart(view(ACME, 'POST', START))
+
+        when:
+        c.windowStart(view(ACME, 'POST', [minutes: '30', note: 'longer job']))
+
+        then:
+        windowRows().size() == 1
+        ChangeWindows.current(27L).note == 'longer job'
+        audited.count { it.contains('change window replaced') } == 1
+    }
+
+    def 'a window survives a reload'() {
+        given:
+        controller().windowStart(view(ACME, 'POST', START))
+        MorpheusContext m = morpheus()
+
+        when: 'the plugin reloads, with nothing in memory yet'
+        ChangeWindows.stop()
+
+        then:
+        !Paging.held(27L)
+
+        when:
+        ChangeWindows.refresh(m)
+
+        then:
+        Paging.held(27L)
+        ChangeWindows.current(27L).by == 'someone'
+    }
+
+    def 'the plugin reads open windows as soon as it starts, without waiting for a monitor pass'() {
+        given:
+        controller().windowStart(view(ACME, 'POST', START))
+        MorpheusContext m = morpheus()
+        ChangeWindows.stop()
+
+        when:
+        ChangeWindows.start(m)
+
+        then:
+        new PollingConditions(timeout: 10).eventually { assert Paging.held(27L) }
+    }
+
+    def 'a window that could not be read after a reload holds nothing, so a cluster pages rather than stays quiet'() {
+        given:
+        controller().windowStart(view(ACME, 'POST', START))
+        ChangeWindows.stop()
+        onStoreList = { throw new IllegalStateException('store down') }
+
+        when:
+        ChangeWindows.refresh(morpheus())
+
+        then:
+        noExceptionThrown()
+        !Paging.held(27L)
+    }
+
+    def 'a store that fails later leaves what was known'() {
+        given:
+        controller().windowStart(view(ACME, 'POST', START))
+        onStoreList = { throw new IllegalStateException('store down') }
+
+        when:
+        ChangeWindows.refresh(morpheus())
+
+        then:
+        Paging.held(27L)
+    }
+
+    def 'a window ends by itself at its time, with nothing having to run, and the store is tidied later'() {
+        given:
+        Map w = controller().windowStart(view(ACME, 'POST', START)).data.data as Map
+        long ends = w.endsAt as long
+
+        expect:
+        Paging.held(27L, ends - 1)
+        !Paging.held(27L, ends)
+        ChangeWindows.current(27L, ends + 1) == null
+        windowRows().size() == 1
+
+        when:
+        ChangeWindows.refresh(morpheus(), ends + 1)
+
+        then:
+        windowRows() == []
+        !Paging.held(27L)
+    }
+
+    def 'a row that cannot be read is no window, and goes'() {
+        given:
+        stored << new OperationData(id: 1L, category: ChangeWindows.CATEGORY, refId: '27', rawData: raw)
+
+        when:
+        ChangeWindows.refresh(morpheus())
+
+        then:
+        !Paging.held(27L)
+        windowRows() == []
+
+        where:
+        raw << ['{not json', '{"clusterId":27}', '{"endsAt":"tomorrow","clusterId":27}', null]
+    }
+
+    def 'of two rows for one cluster the newest wins, and the other goes, in either order'() {
+        given:
+        long far = System.currentTimeMillis() + 3_600_000L
+        OperationData older = new OperationData(id: 1L, category: ChangeWindows.CATEGORY, refId: '27', rawData: JsonOutput.toJson([clusterId: 27, startedAt: 1L, endsAt: far, by: 'a', note: 'older']))
+        OperationData newer = new OperationData(id: 2L, category: ChangeWindows.CATEGORY, refId: '27', rawData: JsonOutput.toJson([clusterId: 27, startedAt: 2L, endsAt: far, by: 'b', note: 'newer']))
+        stored.addAll(first ? [older, newer] : [newer, older])
+
+        when:
+        ChangeWindows.refresh(morpheus())
+
+        then:
+        ChangeWindows.current(27L).note == 'newer'
+        windowRows()*.id == [2L]
+
+        where:
+        first << [true, false]
+    }
+
+    def 'ending a window puts paging back, and it stays ended after a reload'() {
+        given:
+        def c = controller()
+        c.windowStart(view(ACME, 'POST', START))
+        audited.clear()
+
+        when:
+        def r = c.windowEnd(view(ACME, 'POST'))
+
+        then:
+        r.status == 200
+        r.data.data.ended == true
+        !Paging.held(27L)
+        windowRows() == []
+        audited.count { it.contains('change window ended') } == 1
+
+        when:
+        ChangeWindows.stop()
+        ChangeWindows.refresh(morpheus())
+
+        then:
+        !Paging.held(27L)
+    }
+
+    def 'ending with nothing open is no error and no audit entry, as a second click would be'() {
+        when:
+        def r = controller().windowEnd(view(ACME, 'POST'))
+
+        then:
+        r.status == 200
+        r.data.data.ended == false
+        audited == []
+    }
+
+    def 'a window that cannot be removed stays, and says so, as it would come back on the next read'() {
+        given:
+        def c = controller()
+        c.windowStart(view(ACME, 'POST', START))
+        audited.clear()
+        onUnstore = { OperationData row -> false }
+
+        when:
+        def r = c.windowEnd(view(ACME, 'POST'))
+
+        then:
+        r.status == 400
+        r.data.msg.contains('paging stays held')
+        Paging.held(27L)
+        audited == []
+    }
+
+    def 'the report says nothing of a window, whose reason can name anyone'() {
+        given:
+        def c = controller()
+        c.windowStart(view(ACME, 'POST', [minutes: '60', note: 'moving Initech off this cluster']))
+        HealthMonitor.LAST[27L] = [overall: 'HEALTHY', at: 1L, mode: 'quick', counts: [fail: 0, warn: 0, pass: 1], readiness: [], hosts: [], results: []]
+
+        when:
+        def r = c.report(view(ACME, 'GET'))
+
+        then:
+        r.status == 200
+        !JsonOutput.toJson(r.data).contains('Initech')
+    }
+
+    def 'the all-clusters page shows who holds a window, and only the master tenant reaches that'() {
+        given:
+        def c = controller()
+        c.windowStart(view(ACME, 'POST', START))
+
+        expect:
+        c.fleet(view(MASTER, 'GET')).data.data[0].window.note == 'firmware on the hosts'
+        c.fleet(view(ACME, 'GET')).status == 403
+    }
+
+    def 'with no window, a row on the all-clusters page says none'() {
+        expect:
+        controller().fleet(view(MASTER, 'GET')).data.data[0].window == null
+    }
+
+    def 'a tenant with no claim on a cluster cannot end the window its operator started'() {
+        given:
+        def c = controller()
+        c.windowStart(view(ACME, 'POST', START))
+
+        when:
+        def r = c.windowEnd(view(INITECH, 'POST'))
+
+        then:
+        r.status == 403
+        Paging.held(27L)
+        windowRows().size() == 1
+    }
+
+    def 'a tenant listed in the Operator tenants setting may start one too'() {
+        given:
+        settings = '{"operatorTenants":"4"}'
+
+        expect:
+        controller().windowStart(view(INITECH, 'POST', START)).status == 200
+    }
+
+    def 'checks, alarms and history carry on inside a window'() {
+        given:
+        cluster.owner = MASTER
+        frozenCluster()
+        MorpheusContext m = morpheus()
+        controller().windowStart(view(MASTER, 'POST', START))
+
+        when:
+        Map v = HealthMonitor.run(m, new HealthContext(m, 27L), [:], 'quick', false)
+
+        then:
+        v.results.any { it.id == 'DLM-01' }
+        created.any { it.name.startsWith('DLM-01') }
+        stored.any { it.category == 'hvm-cluster-health-history' }
+    }
+
+    // ------------------------------------------------------------------ what a window holds
+
+    private static Map viewWith(String overall, List<Map> results, List<Map> hostsNow = []) {
+        [overall: overall, results: results, hosts: hostsNow]
+    }
+
+    def 'what always pages is never held'() {
+        given:
+        controller().windowStart(view(ACME, 'POST', START))
+
+        expect:
+        Paging.held(27L)
+        Paging.state(27L, viewWith('CRITICAL', [[id: id, status: 'FAIL']])) == 'CRITICAL'
+
+        where:
+        id << Paging.ALWAYS_PAGE
+    }
+
+    def 'a frozen cluster pages through a window, whichever way the freeze is known'() {
+        given:
+        controller().windowStart(view(ACME, 'POST', START))
+
+        expect:
+        Paging.state(27L, viewWith('HEALTHY', [], [[frozen: true]])) == 'CRITICAL'
+
+        when:
+        FreezeWatch.FROZEN_SINCE[27L] = 1L
+
+        then:
+        Paging.state(27L, viewWith('HEALTHY', [])) == 'CRITICAL'
+
+        cleanup:
+        FreezeWatch.FROZEN_SINCE.remove(27L)
+    }
+
+    def 'anything else is held inside a window, and pages again once it has ended'() {
+        given:
+        Map w = controller().windowStart(view(ACME, 'POST', START)).data.data as Map
+        Map v = viewWith(overall, [[id: 'NET-01', status: 'FAIL']])
+
+        expect:
+        Paging.state(27L, v) == 'OK'
+        Paging.state(27L, v, (w.endsAt as long) + 1) == outside
+
+        where:
+        overall    | outside
+        'CRITICAL' | 'CRITICAL'
+        'DEGRADED' | 'WARNING'
+        'WARNING'  | 'WARNING'
+    }
+
+    def 'only a failure of what always pages breaks through: a warning on one is held'() {
+        given:
+        controller().windowStart(view(ACME, 'POST', START))
+
+        expect:
+        Paging.state(27L, viewWith('WARNING', [[id: 'NET-13', status: 'WARN']])) == 'OK'
+    }
+
+    def 'a window on one cluster holds no other'() {
+        given:
+        controller().windowStart(view(ACME, 'POST', START))
+
+        expect:
+        Paging.state(28L, viewWith('DEGRADED', [[id: 'NET-01', status: 'FAIL']])) == 'WARNING'
+    }
+
+    def 'no evaluation is unknown, window or not'() {
+        given:
+        controller().windowStart(view(ACME, 'POST', START))
+
+        expect:
+        Paging.state(27L, null) == 'UNKNOWN'
+    }
+
+    def 'no evaluation is still CRITICAL when the freeze watch holds the cluster frozen: frozen wins, window or not'() {
+        given:
+        FreezeWatch.FROZEN_SINCE[27L] = 1L
+
+        expect:
+        Paging.state(27L, null) == 'CRITICAL'
+        Paging.state(28L, null) == 'UNKNOWN'
+
+        when:
+        controller().windowStart(view(ACME, 'POST', START))
+
+        then:
+        Paging.state(27L, null) == 'CRITICAL'
+
+        cleanup:
+        FreezeWatch.FROZEN_SINCE.remove(27L)
     }
 
     def 'same-named hosts in two clusters do not share the retry'() {

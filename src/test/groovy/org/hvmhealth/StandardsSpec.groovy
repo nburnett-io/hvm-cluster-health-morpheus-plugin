@@ -18,7 +18,13 @@ class StandardsSpec extends Specification {
         where:
         code                                             | version | os      | vs    | hci
         'mvm-1.3-ubuntu-24.04-std-morpheus-amd64'        | '1.3'   | '24.04' | false | false
-        'mvm-1.3-ubuntu-24.04-morpheus-amd64'            | '1.3'   | '24.04' | false | true
+        'mvm-1.3-ubuntu-24.04-morpheus-amd64'            | '1.3'   | '24.04' | false | false
+        'mvm-1.3-ubuntu-24.04-custom-gfs2-amd64'         | '1.3'   | '24.04' | false | false
+        'mvm-1.3-ubuntu-24.04-archive-morpheus-amd64'    | '1.3'   | '24.04' | false | false
+        'mvm-1.3-ubuntu-24.04-ceph-hci-amd64'            | '1.3'   | '24.04' | false | true
+        'mvm-1.3-ubuntu-24.04-hci-morpheus-amd64'        | '1.3'   | '24.04' | false | true
+        'mvm-1.3-ubuntu-24.04-ceph-morpheus-amd64'       | '1.3'   | '24.04' | false | true
+        'mvm-1.3-ubuntu-24.04-HCI-morpheus-amd64'        | '1.3'   | '24.04' | false | true
         'mvm-2.0-virtswitch-ubuntu-26.04-morpheus-amd64' | '2.0'   | '26.04' | true  | false
         'kubernetes-1.35-ubuntu-24.04-hvm-amd64-single'  | null    | '24.04' | false | false
         null                                             | null    | null    | false | false

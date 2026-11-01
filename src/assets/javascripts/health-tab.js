@@ -53,7 +53,7 @@
   function btn(label, fn, cls) { var b = el('button', { 'class': 'btn btn-sm ' + (cls || 'btn-default'), type: 'button', text: label }); b.addEventListener('click', fn); return b; }
   function table(head, rows) {
     return el('table', {}, [el('thead', {}, [el('tr', {}, head.map(function (h) { return el('th', { text: h }); }))]),
-      el('tbody', {}, rows.map(function (r) { return el('tr', {}, r.map(function (c) { return c instanceof Node ? el('td', {}, [c]) : el('td', { text: c == null ? '' : String(c) }); })); }))]);
+      el('tbody', {}, rows.map(function (r) { return r instanceof Node ? r : el('tr', {}, r.map(function (c) { return c instanceof Node ? el('td', {}, [c]) : el('td', { text: c == null ? '' : String(c) }); })); }))]);
   }
   function put(box, node) { box.innerHTML = ''; box.classList.remove('hh-muted'); if (node) box.appendChild(node); }
   function ago(ms) { var m = Math.round((Date.now() - ms) / 60000); return m < 1 ? 'just now' : (m < 120 ? m + ' min ago' : Math.round(m / 60) + ' h ago'); }
@@ -231,10 +231,12 @@
       var box = body('summary'), s = state.status, v = state.view;
       if (!v) {
         var known = s && s.known;
-        put(box, el('div', {}, [el('div', { 'class': 'hh-muted', text: (s ? (s.layout + '. ') : '') + 'Not checked since the plugin loaded. Run a full check, or wait for the automatic one.' + (known ? ' Last known: ' + known.overall + ', ' + new Date(known.at).toLocaleString() + '.' : '') }), summaryNotes(null)]));
+        var why = s && s.standingBy ? 'Another appliance node runs the automatic checks, and only it holds their findings. Run a full check to see them here.' : 'Not checked since the plugin loaded. Run a full check, or wait for the automatic one.';
+        put(box, el('div', {}, [el('div', { 'class': 'hh-muted', text: (s ? (s.layout + '. ') : '') + why + (known ? ' Last known: ' + known.overall + ', ' + new Date(known.at).toLocaleString() + '.' : '') }), summaryNotes(null)]));
         return;
       }
-      var auto = s ? (s.monitorMinutes > 0 ? 'Automatic check every ' + s.monitorMinutes + ' min.' : 'Automatic checks are off.') : '';
+      var auto = s ? (s.standingBy ? 'Another appliance node runs the automatic checks, so this is what was checked here by hand.' : s.monitorMinutes > 0 ? 'Automatic check every ' + s.monitorMinutes + ' min.' : 'Automatic checks are off.') : '';
+      if (s && s.watch) { auto += ' Freeze watch about every ' + s.watch.seconds + ' s' + (s.watch.seconds > s.watch.setTo ? ' (set to ' + s.watch.setTo + ' s, stretched to stay within its budget of reads).' : '.'); }
       var fixes = s ? ('Automatic fixes: safe ' + (s.autoFixSafe ? 'on' : 'off') + ', in maintenance ' + (s.autoFixMaintenance ? 'on' : 'off') + ((s.autoFixSafe || s.autoFixMaintenance) ? (s.autoFixNamed ? ', and this cluster is named for them.' : ', but this cluster is not named for them, so none run here.') : '.')) : '';
       put(box, el('div', {}, [
         el('div', { 'class': 'hh-banner hh-ov-' + v.overall, text: v.overall + ': ' + v.counts.fail + ' failing, ' + v.counts.warn + ' warnings, ' + v.counts.pass + ' passing' }),
@@ -267,14 +269,88 @@
       filter.innerHTML = '';
       filter.appendChild(btn(state.showPass ? 'Show problems only' : 'Show everything (' + v.results.length + ')', function () { state.showPass = !state.showPass; renderFindings(); }));
       if (!rows.length) { put(box, el('div', { 'class': 'st-PASS', text: 'Nothing failing or warning.' })); return; }
-      put(box, table(['Status', 'Severity', 'Check', 'Host', 'Observed', 'Expected', 'Source', 'First seen', ''], rows.map(function (r) {
-        var check = el('div', {}, [ref.idLink(r.id), ' ' + r.title]);
+      /** explainedBy: the root's id, on a finding another check explains. inGroup: its heading already says who is reached. */
+      function row(r, explainedBy, inGroup) {
+        var check = el('div', { 'class': inGroup ? 'hh-member' : '' }, [ref.idLink(r.id), ' ' + r.title]);
+        if (explainedBy) check.appendChild(el('div', { 'class': 'hh-impact', text: 'Explained by ' + explainedBy + ' while that is open.' }));
         if (r.hint) check.appendChild(el('div', { 'class': 'hh-hint', text: r.hint }));
-        if (r.impact) check.appendChild(el('div', { 'class': 'hh-impact', text: 'Affects: ' + r.impact }));
+        if (r.reach && !inGroup) check.appendChild(el('div', { 'class': 'hh-impact', text: sentence(r.reach.text) }));
+        // the older text names the VMs of a host that did not answer, which reach only counts
+        if (r.impact && (!r.reach || r.reach.unknownState)) check.appendChild(el('div', { 'class': 'hh-impact', text: 'Affects: ' + r.impact }));
         var f = fixButton(r);
         var act = f ? el('div', {}, [f, el('span', { 'class': 'hh-tier', text: TIER[r.tier] || '' })]) : '';
-        return [el('span', { 'class': 'hh-nw st-' + r.status, text: r.status.replace('_', ' ') }), el('span', { 'class': 'hh-nw', text: r.severity }), check, el('span', { 'class': 'hh-nw', text: r.host || 'cluster' }), r.observed, r.expected, el('span', { 'class': 'hh-nw', text: r.source }), r.firstSeen ? el('span', { 'class': 'hh-nw', text: new Date(r.firstSeen).toLocaleString() }) : '', act];
-      })));
+        return [el('span', { 'class': 'hh-nw hh-word st-' + r.status, text: r.status.replace('_', ' ') }), el('span', { 'class': 'hh-nw hh-word', text: r.severity }), check, el('span', { 'class': 'hh-nw', text: r.host || 'cluster' }), r.observed, r.expected, el('span', { 'class': 'hh-nw hh-word', text: r.source }), r.firstSeen ? el('span', { 'class': 'hh-nw hh-word', text: new Date(r.firstSeen).toLocaleString() }) : '', act];
+      }
+      var head = ['Status', 'Severity', 'Check', 'Host', 'Observed', 'Expected', 'Source', 'First seen', ''];
+      if (!v.incidents) { put(box, table(head, rows.map(function (r) { return row(r); }))); return; }
+      // every finding is listed, grouped: anything no group holds still gets its row
+      var out = [], placed = {};
+      v.incidents.forEach(function (g) {
+        var root = v.results[g.members[0]], many = g.members.length > 1, firstSymptom = g.members.length - g.symptoms;
+        if (many) out.push(incidentRow(g, root));
+        g.members.forEach(function (at, n) {
+          placed[at] = 1;
+          out.push(row(v.results[at], n >= firstSymptom ? root.id : null, many));
+        });
+      });
+      v.results.forEach(function (r, at) { if (!placed[at] && rows.indexOf(r) >= 0) out.push(row(r)); });
+      put(box, table(head, out));
+    }
+
+    /** The heading of a group: the check, the hosts it is on, how much it explains, and who it reaches. */
+    function incidentRow(g, root) {
+      var on = g.rootHosts.length ? 'on ' + g.rootHosts.join(', ') : 'on the cluster';
+      var also = g.symptoms ? ', and explains ' + g.symptoms + ' related finding' + (g.symptoms === 1 ? '' : 's') : '';
+      return el('tr', { 'class': 'hh-incident' }, [el('td', { colspan: '9' }, [
+        el('span', { 'class': 'hh-nw st-' + g.status, text: g.status.replace('_', ' ') }), ' ', ref.idLink(root.id), ' ' + root.title + ' ' + on + also + '.',
+        g.reach ? el('div', { 'class': 'hh-impact', text: sentence(g.reach.text) }) : null])]);
+    }
+
+    function sentence(s) { return s.charAt(0).toUpperCase() + s.slice(1) + '.'; }
+
+    /** Who is working on the cluster and why, and the way to start or end that. Only drawn again when it changed, so what someone is typing survives a refresh. */
+    function renderWindow() {
+      var s = state.status, w = s && s.window && s.window.endsAt > Date.now() ? s.window : null, shown = JSON.stringify([w, canFix()]);
+      if (!s || shown === state.windowShown) return;
+      state.windowShown = shown;
+      clearTimeout(state.windowTimer);
+      var box = body('window');
+      function changed(next) { s.window = next; renderWindow(); }
+      if (w) {
+        state.windowTimer = setTimeout(renderWindow, Math.min(w.endsAt - Date.now() + 1000, 2147483647));   // it ends by itself, so the banner must too
+        put(box, el('div', { 'class': 'hh-window' }, [
+          el('strong', { text: 'Change window: paging held until ' + new Date(w.endsAt).toLocaleString() + '.' }),
+          el('div', { text: w.by + ': ' + w.note }),
+          el('div', { 'class': 'hh-muted', text: 'Started ' + new Date(w.startedAt).toLocaleString() + '. Checks, alarms and history carry on. Freezes, withdrawn filesystems and isolation failures still page.' }),
+          canFix() ? el('div', { 'class': 'hh-row' }, [btn('End window', function (ev) {
+            if (!window.confirm('End the change window? Paging goes back to normal at once.')) return;
+            ev.target.disabled = true;
+            call('window-end', {}, true).then(function () { changed(null); }, function (e) { ev.target.disabled = false; window.alert(e.message); });
+          })]) : null]));
+        return;
+      }
+      if (!canFix()) { put(box, null); return; }
+      var minutes = el('input', { type: 'number', min: '1', value: '60', 'class': 'hh-window-minutes', 'aria-label': 'Minutes' });
+      var note = el('input', { type: 'text', maxlength: '200', 'class': 'hh-window-note', placeholder: 'What the work is', 'aria-label': 'What the work is' });
+      var start = btn('Start window', function () {
+        start.disabled = true;
+        call('window-start', { minutes: minutes.value, note: note.value }, true).then(changed, function (e) { start.disabled = false; window.alert(e.message); });
+      });
+      put(box, el('div', { 'class': 'hh-row' }, [start, minutes, el('span', { 'class': 'hh-muted', text: 'minutes, at most ' + s.maxWindowHours + ' hours. Holds paging during planned work, and ends by itself. Checks and alarms carry on.' }), note]));
+    }
+
+    /** What is loading a slow host, when the check read it. Not every check does, so no data means no panel, never a quiet host. */
+    function renderBusiest() {
+      var list = (state.view && state.view.busiest) || [];
+      if (!list.length) { put(body('busiest'), null); return; }
+      function val(x, unit) { return x == null ? 'not read' : x + (unit || ''); }
+      put(body('busiest'), el('div', {}, [
+        el('h3', { text: 'Busiest VMs' }),
+        el('div', { 'class': 'hh-muted', text: 'The VMs using the most CPU and I/O on each host read, over 2 s. For operators: it is left out of the report.' }),
+        table(['Host', 'VM', 'Tenant', 'CPU', 'Read IOPS', 'Write IOPS', 'Read MB/s', 'Write MB/s'], list.map(function (x) {
+          var b = Array.isArray(x) ? { host: x[0], vm: x[1], tenant: x[2], cpuPct: x[3], readIops: x[4], writeIops: x[5], readMBs: x[6], writeMBs: x[7] } : x;
+          return [el('span', { 'class': 'hh-nw', text: b.host }), b.vm, b.tenant || '', val(b.cpuPct, '%'), val(b.readIops), val(b.writeIops), val(b.readMBs), val(b.writeMBs)];
+        }))]));
     }
 
     /** What the cluster's time source is, what each host really does, and where to define it. */
@@ -296,8 +372,8 @@
         wrap.appendChild(el('div', { 'class': 'hh-row' }, [input, save, el('span', { 'class': 'hh-muted', text: 'Hosts are verified against this. Nothing changes on a host until you run its fix, in maintenance mode.' })]));
       }
       wrap.appendChild(table(['Host', 'Time source', 'Daemon', 'Following now', 'Configured', 'Synced', 'Offset from source', 'Drift from other hosts', 'Stratum'], t.hosts.map(function (h) {
-        return [el('span', { 'class': 'hh-nw', text: h.name }), el('span', { 'class': h.state === 'cluster source' ? 'hh-nw st-PASS' : (h.state === 'none configured' ? 'hh-nw st-FAIL' : 'hh-nw st-WARN'), text: h.state }),
-          h.daemon || 'none', h.following || 'nothing', (h.configured || []).join(', ') || 'none', h.synced === true ? 'yes' : (h.synced === false ? el('span', { 'class': 'st-FAIL', text: 'NO' }) : '?'),
+        return [el('span', { 'class': 'hh-nw', text: h.name }), el('span', { 'class': 'hh-word ' + (h.state === 'cluster source' ? 'hh-nw st-PASS' : (h.state === 'none configured' ? 'hh-nw st-FAIL' : 'hh-nw st-WARN')), text: h.state }),
+          el('span', { 'class': 'hh-word', text: h.daemon || 'none' }), h.following || 'nothing', (h.configured || []).join(', ') || 'none', h.synced === true ? 'yes' : (h.synced === false ? el('span', { 'class': 'st-FAIL', text: 'NO' }) : '?'),
           h.offsetMs != null ? h.offsetMs + ' ms' : '', h.driftMs != null ? (h.driftMs > 0 ? '+' : '') + h.driftMs + ' ms' : '', h.stratum == null ? '' : h.stratum];
       })));
       put(box, wrap);
@@ -330,6 +406,32 @@
       box.appendChild(d);
     }
 
+    function hpeBad(c) { return c.status === 'FAIL' || c.status === 'WARN'; }
+    /** One host's line of HPE's checks, opened for the list, problems first. Text only, and odd output costs that host its line, never the tab. */
+    function hpeHost(h) {
+      try {
+        var checks = Array.isArray(h.checks) ? h.checks : [];
+        if (!checks.length) return el('div', { 'class': 'hh-muted', text: h.host + ': ' + (h.note || 'nothing to show') });
+        var raised = checks.filter(function (c) { return hpeBad(c) && !c.ignored; });
+        var masked = checks.filter(function (c) { return hpeBad(c) && c.pacemaker; });
+        var rows = checks.filter(hpeBad).concat(checks.filter(function (c) { return !hpeBad(c); })).map(function (c) {
+          var known = ['PASS', 'WARN', 'FAIL', 'NA'].indexOf(c.status) >= 0;
+          return [el('span', { 'class': 'hh-word', text: c.check }), el('span', { 'class': 'hh-word', text: c.type }), el('span', { 'class': known ? 'hh-nw hh-word hh-st-' + c.status : 'hh-nw hh-word hh-muted', text: c.status }), c.details,
+            c.pacemaker ? 'reads Pacemaker, which HVM masks' : (c.ignored ? 'ignored by hvmcliIgnore' : '')];
+        });
+        return el('details', {}, [el('summary', { text: h.host + ': ' + checks.length + ' checks, ' + raised.length + ' raised' + (masked.length ? ', ' + masked.length + ' reading Pacemaker' : '') }),
+          table(['Check', 'Type', 'Status', 'What HPE said', ''], rows)]);
+      } catch (e) {
+        return el('div', { 'class': 'hh-err', text: 'One host\'s HPE checks could not be shown.' });
+      }
+    }
+    function hpePanel(v) {
+      var hosts = Array.isArray(v.hpeChecks) ? v.hpeChecks : [];
+      if (!hosts.length) return null;
+      return el('div', { 'class': 'hh-panel' }, [el('strong', { text: 'HPE checks' }),
+        el('div', { 'class': 'hh-muted', text: 'HPE\'s own answers from hvmcli health check, at the last full check' + (v.fullAt ? ' (' + ago(v.fullAt) + ')' : '') + '. HPE-01 names any raised outside hvmcliIgnore.' })].concat(hosts.map(hpeHost)));
+    }
+
     function renderHosts() {
       var v = state.view;
       if (!v) { put(body('hosts'), null); return; }
@@ -350,10 +452,12 @@
             call('raw', { host: h.name }).then(function (r) { out.textContent = r.output; }, function (e) { out.textContent = e.message; });
           })]);
         return [el('span', { 'class': 'hh-nw', text: h.name }), h.answered ? 'yes' : el('span', { 'class': 'st-FAIL', text: 'NO' }), h.maintenance ? 'yes' : 'no', h.running,
-          h.frozen ? el('span', { 'class': 'st-FAIL', text: 'FROZEN' }) : 'no', h.dStuck, h.os || '', h.kernel || '', acts];
+          h.frozen ? el('span', { 'class': 'hh-word st-FAIL', text: 'FROZEN' }) : 'no', h.dStuck, h.os || '', h.kernel || '', acts];
       })));
       wrap.appendChild(panel);
       wrap.appendChild(out);
+      var hpe = hpePanel(v);
+      if (hpe) wrap.appendChild(hpe);
       put(body('hosts'), wrap);
     }
 
@@ -361,7 +465,7 @@
       var s = state.status, list = (state.view && state.view.standards) || (s && s.standards) || [];
       if (s && s.standardsError) { put(body('standards'), el('div', { 'class': 'hh-err', text: s.standardsError })); return; }
       put(body('standards'), table(['Key', 'Value', 'Source', 'Why'], list.map(function (x) {
-        return [x.key, x.value == null ? '(not pinned)' : String(x.value), x.source, x.note];
+        return [el('span', { 'class': 'hh-word', text: x.key }), x.value == null ? '(not pinned)' : String(x.value), el('span', { 'class': 'hh-word', text: x.source }), x.note];
       })));
     }
 
@@ -403,11 +507,24 @@
       put(box, wrap);
     }
 
-    function showView(v) { state.view = v; renderSummary(); renderEmergency(); renderFindings(); renderTime(); renderHosts(); renderStandards(); }
+    /** What the checks forecast. They say for themselves when there is too little data, so nothing here reads as fine for want of it. */
+    function renderCapacity() {
+      var v = state.view, box = body('capacity');
+      if (!v) { put(box, null); return; }
+      var rows = v.results.filter(function (r) { return r.id === 'CAP-02' || r.id === 'CAP-03' || r.id === 'GFS-11' || r.id === 'STO-07'; });
+      put(box, el('div', {}, [
+        v.trendError ? el('div', { 'class': 'hh-err', text: 'Capacity samples are not being saved: ' + v.trendError }) : null,
+        rows.length ? table(['Status', 'Check', 'Host', 'Observed', 'Expected'], rows.map(function (r) {
+          return [el('span', { 'class': 'hh-nw hh-word st-' + r.status, text: r.status.replace('_', ' ') }), el('div', {}, [ref.idLink(r.id), ' ' + r.title]), el('span', { 'class': 'hh-nw', text: r.host || 'cluster' }), r.observed, r.expected];
+        })) : el('div', { 'class': 'hh-muted', text: 'Nothing forecast yet.' })]));
+    }
+
+    function showView(v) { state.view = v; renderSummary(); renderEmergency(); renderFindings(); renderBusiest(); renderCapacity(); renderTime(); renderHosts(); renderStandards(); }
 
     function load() {
       call('status').then(function (s) {
         state.status = s;
+        renderWindow();
         (s.jobs || []).forEach(function (j) { follow(j, refreshAfter); });
         showView(s.last || null);
       }, function (e) { put(body('summary'), el('div', { 'class': 'hh-err', text: e.message })); });
@@ -419,6 +536,7 @@
     });
     root.querySelector('[data-act="help"]').addEventListener('click', function () { ref.showAll(); });
     root.querySelector('[data-act="report"]').addEventListener('click', function () { ns.pages.report(body('report'), call); });
+    root.querySelector('[data-act="availability"]').addEventListener('click', function () { ns.pages.availability(root.querySelector('[data-field="availability"]'), call); });
     load();
   }
 

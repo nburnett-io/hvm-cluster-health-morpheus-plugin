@@ -10,8 +10,25 @@ import java.util.regex.Pattern
  */
 class HealthReport {
     static final String WITHHELD = '[withheld]'
-    /** The observed text of these lists VMs, including ones Morpheus does not know about, so no list of names could catch them all. */
-    static final Set<String> NAMES_VMS = ['HA-06', 'VM-01', 'VM-02', 'VM-05', 'MIG-04', 'MIG-06', 'MIG-07', 'NET-12', 'NET-13'] as Set
+    static final String WITHHELD_OBSERVED = 'withheld: this finding may name a VM, tenant or network'
+    /**
+     * The report withholds by allow-list, not by deny-list: an observation is carried only when its check is known to name only hosts, storage, configuration
+     * and numbers. Anything else, a new check included, is withheld, so an unknown name cannot leak. Scrubbing by name stays on top, as a second line.
+     *
+     * Whole prefixes whose observations never name a VM, tenant or network:
+     */
+    static final Set<String> SAFE_PREFIXES = ['CAP', 'CLU', 'DLM', 'FEN', 'GFS', 'HB', 'HPE', 'HST', 'HW', 'KRN', 'LAY', 'MOR', 'PKG', 'PRB', 'STO', 'TIM'] as Set
+    /** Checks in a mixed prefix (one that elsewhere names VMs, tenants or networks) whose own observation does not. Everything else in those prefixes is withheld. */
+    static final Set<String> SAFE_IDS = ['HA-01', 'HA-02', 'HA-03', 'HA-04', 'HA-05', 'MIG-01', 'MIG-02', 'MIG-03', 'MIG-05',
+                                         'NET-01', 'NET-02', 'NET-03', 'NET-04', 'NET-05', 'NET-06', 'NET-07', 'NET-08', 'NET-09', 'NET-10', 'NET-11', 'NET-14', 'NET-15', 'NET-16', 'NET-17', 'NET-18', 'NET-19',
+                                         'VM-03', 'VM-04', 'SEC-02', 'SEC-03', 'SEC-04'] as Set
+    /** Checks whose observation can carry a VM, tenant, network or other-cluster name, so it is always withheld. Kept explicit so the test can prove every mixed-prefix check is classified. */
+    static final Set<String> WITHHELD_IDS = ['HA-06', 'MIG-04', 'MIG-06', 'MIG-07', 'NET-12', 'NET-13', 'VM-01', 'VM-02', 'VM-05', 'VM-06', 'VM-07', 'SEC-01', 'SEC-05', 'SEC-06', 'FLT-01'] as Set
+
+    /** Allow-list: the observation is carried only when the check is known name-free. A check in no safe prefix and no safe id, new ones included, is withheld. */
+    static boolean observedSafe(String id) {
+        id != null && (id.replaceFirst(/-.*/, '') in SAFE_PREFIXES || id in SAFE_IDS)
+    }
     static final String CONTAINS = 'The cluster and its layout, the latest result, current findings (check, severity, status, host, what was observed and expected, source, first seen) and the history of findings (first seen, last seen, cleared).'
     static final String EXCLUDES = 'No tenant data: who a finding affects and the names of tenants, VMs and networks are withheld. Hints, fixes and raw host output are left out. Host and storage names stay.'
     static final List<String> CSV_COLUMNS = ['cluster', 'generated', 'section', 'status', 'worst_status', 'severity', 'check', 'title', 'host', 'observed', 'expected', 'source', 'first_seen', 'last_seen', 'cleared', 'returned']
@@ -57,7 +74,7 @@ class HealthReport {
             current = (last.results as List<Map>).findAll { it.status in ['FAIL', 'WARN', 'NOT_CHECKED'] }.collect { Map r ->
                 Object first = r.firstSeen ?: open[FindingHistory.key(r.id as String, r.host as String, r.title as String)]?.first
                 [check: r.id, title: title(FindingHistory.safeTitle(r.id as String, r.title as String)), host: r.host, severity: r.severity, status: r.status,
-                 observed: r.id in NAMES_VMS ? 'withheld: this finding names VMs' : scrub(r.observed as String), expected: scrub(r.expected as String), source: r.source, firstSeen: iso(first)]
+                 observed: observedSafe(r.id as String) ? scrub(r.observed as String) : WITHHELD_OBSERVED, expected: scrub(r.expected as String), source: r.source, firstSeen: iso(first)]
             }
         } else {
             current = eps.findAll { it.cleared == null }.collect { Map e -> episode(e) + [observed: null, expected: null, source: null] }
