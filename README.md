@@ -30,7 +30,7 @@ state, says which node it waits on, and warns about the conditions that lead to 
 | Security and tenant isolation | Full checks: a customer VM exposing VMX/SVM to its guest (gated on the cluster CPU model), whether the kernel carries the KVM guest-to-host escape fix, a customer VM sharing the host storage or cluster VLAN, `cache=unsafe` on a disk, and notes on CPU side-channel state, the 2.0 bridge STP design, and the (absent) per-VM resource limits |
 | Capacity | Whether running VMs fit if the largest host fails, free space for the largest VM's disks |
 | Storage | Multipath health (ALUA standby paths read as healthy standby), the no_path_retry window in seconds against the corosync token and a site ceiling, iSCSI and Fibre Channel transport, per-vendor profiles with unknown vendors left unjudged, node.startup, recovery_tmo, paths per LUN, thin-LUN soft and hard space failures, all-paths-lost history, latency per LUN and the busiest VMs on a slow host, and how long GFS2 metadata takes to answer |
-| Hardware | Power supply redundancy, memory errors, boot disk and MegaRAID physical disk SMART, HPE's own `hvmcli health check` on 2.0, certificates, temperatures, serious hardware log events, BIOS and firmware differences among identical servers, uplink speeds |
+| Hardware | Power supply redundancy, memory errors, boot disk and MegaRAID physical disk SMART, HPE's own `hvmcli health check` on 2.0, certificates, temperatures, serious hardware log events, the management controller's self-test and event log room, chassis fault flags and any sensor not ok, BIOS and firmware differences among identical servers, uplink speeds |
 
 **Every finding names who it affects**: "2 running VMs: Acme (1), Globex (1)".
 
@@ -38,6 +38,7 @@ state, says which node it waits on, and warns about the conditions that lead to 
 - **Can I take it down?** A read-only answer: quorum without it, where each VM can go, and what stands in the way.
 - **Test VLANs**, on a host in maintenance mode: ARPs for each network's gateway through each uplink in turn, including the standby one, on every active-backup bond on a bridge, then puts everything back. VLANs go in runs short enough for corosync's token, so a standby that lacks the ring's VLAN cannot cost the host its membership. It needs `arping` on the host, and says "not tested" without it.
 - **Remove safely**: runs the checks Morpheus's remove does not make, unmounts GFS2 with a time limit, then calls that remove and watches the remaining hosts. See below.
+- **Management controller**: reads the iDRAC or iLO through `ipmitool` on the host, now: self-test, host power, chassis faults, sensors not ok, event log room and the latest events, watchdog, inventory (model, serial, board, part number, BIOS) and the controller's own network. Read access is enough. With full access, **Reset controller** restarts the controller only, never the host, after the host name is typed; it waits for it to answer again and is refused during a GFS2 freeze. Where ipmitool is missing, as on Morpheus-built 1.3 hosts, **Install ipmitool** adds it.
 
 **A Time panel** shows each host's source and drift, and is where you define the cluster's time source to verify against.
 
@@ -58,7 +59,7 @@ any access to a frozen GFS2 mount blocks forever and adds to the problem.
 
 | Tier | Runs when | Examples |
 |---|---|---|
-| Safe | Any time; automatically if you turn that on | Enable a running service at boot |
+| Safe | Any time; automatically if you turn that on | Enable a running service at boot. Install ipmitool and load its driver, which is never automatic: new packages only, refused if anything else would be upgraded or removed, with needrestart held off so no service restarts |
 | Maintenance | Only on a host in maintenance mode, with no running VMs, one host at a time, no freeze anywhere, every host answering, and quorum kept without it. Automatically on such a host if you turn that on | Rejoin the cluster, rescan storage paths (iSCSI or Fibre Channel) and reload multipath, turn on NTP, point the host at the cluster time source |
 | Emergency | A person confirms by typing the node name. Never automatic | Acknowledge a failed node as fenced, to end a freeze |
 

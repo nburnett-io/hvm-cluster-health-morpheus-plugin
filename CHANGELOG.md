@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.0
+
+**Management controller (iDRAC, iLO) through ipmitool**
+- **Management controller panel** on each host: reads the controller now, read-only, through `ipmitool` and the local driver. Status (controller and firmware, self-test, host power, power restore policy, chassis faults and intrusion, sensors ok and not, event log entries and room, watchdog), inventory (model, serial, board, board serial, part number, manufacture date, BIOS) and the controller's network (address, gateway, MAC, VLAN), with the latest 15 events. Read access is enough.
+- **Reset controller**, with full access, after the host name is typed: `ipmitool mc reset cold`, which restarts the controller and never the host. Refused during a GFS2 freeze, and when the controller is not answering in the first place. Audited. It does not wait for the controller to come back: an operation holds the cluster while it runs, and a fence acknowledgement or a freeze check must never wait minutes behind a controller. Open the panel again a few minutes later.
+- **Install ipmitool**, a safe-tier fix that is never automatic, from the panel or from any finding ipmitool's absence leaves unread (FEN-01, HW-01, HW-03, HW-04, HW-08). New packages only from the host's own repositories, refused if apt's simulation would upgrade or remove anything else; the lists are refreshed only when they do not offer it; needrestart is held off; the IPMI driver is loaded and set to load at boot only when it had to be loaded.
+- **HW-08 Management controller healthy** (full check): FAIL when the self-test did not pass, WARN when the event log is 90% full or has overflowed. NOT CHECKED, with the install fix, when ipmitool is missing or no controller answered.
+- **HW-09 No chassis or sensor faults** (full check): FAIL on a chassis fault flag (power overload, main power, power control, drive, cooling or fan), a critical or non-recoverable sensor, or a discrete sensor naming a failure, fault or IERR in its reading, as ipmitool's status column judges thresholds only. WARN on a non-critical sensor. Sensors HW-01 or HW-03 already flag are left to them. PASS only when the whole sensor list and the chassis status were read.
+- **The probe asks the controller once before anything else.** A wedged controller held every ipmitool read to its limit, about 120 s, the whole full probe's budget; now one 10 s `mc info` decides whether the rest run. The event log is read with `sel elist last 40`, as a full log read whole could be cut partway and leave entries from its middle.
+- The wording that Morpheus-built hosts lack ipmitool now says 1.3: 2.0 hosts ship it, and their agent polls the controller with it every minute.
+- A fix can carry its own time limit; the install has 300 s, with `apt-get update` bounded at 60 s and the package lock waited on for 30 s, and the install itself never under a timeout, as a dpkg killed partway leaves the package system needing repair.
+
+Tested live on a test appliance: the panel on three Dell R640 2.0 hosts with iDRAC; the install on two nested 1.3 hosts (new packages only, no controller found, as on a virtual machine) and its already-installed path; the reset's refusals with no typed name and with no controller. An independent review of the change found eleven issues, ten of them fixed here; the eleventh, that the package might start ipmievd, was checked on the installed hosts and it does not. HW-08 and HW-09 passed on the 2.0 hosts. A reset of a real controller, a failing self-test, a full event log and a raised fault have not been seen.
+
 ## 0.4.0
 
 Built for one appliance running about 200 clusters and 600 hosts. Everything below comes with a simulation of that size; how a real appliance bears it is still to be measured.

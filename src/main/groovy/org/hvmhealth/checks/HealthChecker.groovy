@@ -235,10 +235,12 @@ class HealthChecker {
             HostFacts f = h.facts
             // these read through ipmitool, so nothing read is not the same as nothing wrong
             String unread = f.ipmiToolPresent == null ? null : (f.ipmiToolPresent ? 'cannot tell: ipmitool read no such sensors here' : NO_IPMITOOL)
-            String install = f.ipmiToolPresent == false ? 'Morpheus-built hosts do not include ipmitool. Install it to read the hardware through the management controller.' : null
+            String install = f.ipmiToolPresent == false ? INSTALL_HINT : null
+            String fix = f.ipmiToolPresent == false ? INSTALL_FIX : null
+            Tier tier = fix ? Tier.SAFE : Tier.NONE
             List<Map> psu = f.sensors.findAll { it.type == 'Power Supply' }
             if (!psu && unread) {
-                add('HW-01', 'Power supplies healthy and redundant', Severity.HIGH, Status.NOT_CHECKED, h.name, unread, 'fully redundant', 'plugin', null, Tier.NONE, install)
+                add('HW-01', 'Power supplies healthy and redundant', Severity.HIGH, Status.NOT_CHECKED, h.name, unread, 'fully redundant', 'plugin', fix, tier, install)
             }
             if (psu) {
                 List<Map> bad = psu.findAll { !(it.name =~ /(?i)redundan/) && !(it.status in ['ok', 'ns']) }
@@ -261,15 +263,16 @@ class HealthChecker {
             if (f.sensors.any { it.type == 'Temperature' }) {
                 add('HW-03', 'Temperatures within limits', Severity.HIGH, temps ? Status.FAIL : Status.PASS, h.name, temps ? temps.collect { "${it.name}: ${it.reading}" }.join(', ') : 'all ok', 'all ok', 'plugin')
             } else if (unread) {
-                add('HW-03', 'Temperatures within limits', Severity.HIGH, Status.NOT_CHECKED, h.name, unread, 'all ok', 'plugin', null, Tier.NONE, install)
+                add('HW-03', 'Temperatures within limits', Severity.HIGH, Status.NOT_CHECKED, h.name, unread, 'all ok', 'plugin', fix, tier, install)
             }
             List<String> recent = recentSerious(f, days)
             if (f.sel) {
                 add('HW-04', 'No serious hardware events recently', Severity.MEDIUM, recent ? Status.WARN : Status.PASS, h.name, recent ? recent.take(4).join('; ') : "none in ${days} days".toString(), 'none', st.source('selDays'))
             } else if (f.ipmiToolPresent == false) {
                 // with the tool present, an empty log is an answer
-                add('HW-04', 'No serious hardware events recently', Severity.MEDIUM, Status.NOT_CHECKED, h.name, NO_IPMITOOL, 'none', st.source('selDays'), null, Tier.NONE, install)
+                add('HW-04', 'No serious hardware events recently', Severity.MEDIUM, Status.NOT_CHECKED, h.name, NO_IPMITOOL, 'none', st.source('selDays'), fix, tier, install)
             }
+            controllerChecks(h)
             // a failover only moves traffic within a bond: 1G for management beside 25G for storage is a design
             List<Map> mixed = f.nics.groupBy { it.bond }.values().findAll { it*.speed.findAll().unique().size() > 1 }.flatten() as List<Map>
             if (mixed) {
@@ -287,6 +290,51 @@ class HealthChecker {
                 }
             }
         }
+    }
+
+    static final String INSTALL_FIX = 'ipmitool-install'
+    static final String INSTALL_HINT = 'Morpheus-built 1.3 hosts do not include ipmitool (2.0 hosts do). Install it to read the hardware through the management controller.'
+    /** ipmitool's sensor states: critical and non-recoverable, either way, against the non-critical ones. */
+    private static final Set<String> SENSOR_CRITICAL = ['cr', 'nr', 'lcr', 'ucr', 'lnr', 'unr'] as Set
+
+    /**
+     * HW-08: the controller itself, its self-test and whether its event log still has room. HW-09: the chassis fault flags, and sensors
+     * not ok that HW-01 and HW-03 do not already list. Nothing read with the tool present is said once, in HW-08.
+     */
+    private void controllerChecks(Host h) {
+        HostFacts f = h.facts
+        if (f.ipmiToolPresent == null) {
+            return
+        }
+        if (!f.ipmiToolPresent || (!f.bmcSelftest && f.selUsedPct == null && !f.chassisRead)) {
+            add('HW-08', 'Management controller healthy', Severity.MEDIUM, Status.NOT_CHECKED, h.name,
+                    f.ipmiToolPresent ? 'cannot tell: ipmitool is installed, but no management controller answered' : NO_IPMITOOL, 'self-test passed, event log with room', 'plugin', INSTALL_FIX, Tier.SAFE,
+                    f.ipmiToolPresent ? 'Its driver may not be loaded, which the install fix also does, or the host has no controller, as a virtual machine does.' : INSTALL_HINT)
+            return
+        }
+        boolean full = f.selOverflow || (f.selUsedPct ?: 0) >= 90
+        String log = f.selUsedPct == null ? 'event log not read' : "event log ${f.selUsedPct}% used${f.selOverflow ? ', overflowed' : ''}".toString()
+        // ipmitool's "not implemented" is a controller without the command (completion code 0x56), which says nothing about its health
+        boolean failed = f.bmcSelftest && !(f.bmcSelftest in ['passed', 'not implemented'])
+        add('HW-08', 'Management controller healthy', Severity.MEDIUM, failed ? Status.FAIL : (full ? Status.WARN : Status.PASS), h.name,
+                "self-test ${f.bmcSelftest ?: 'not read'}, ${log}".toString(), 'self-test passed, event log with room', 'plugin', null, Tier.NONE,
+                failed ? 'A controller that fails its self-test may not report hardware faults or answer power commands. Reset it from the host\'s Management controller panel, and if it still fails, call the vendor.'
+                        : (full ? 'A full event log stops recording new hardware events, or overwrites the oldest. Save it and clear it on the controller (iDRAC, iLO).' : null))
+        // left to HW-01 and HW-03 only when they flag it: they judge the status column, and a failed discrete sensor's still says ok
+        Set<String> flaggedThere = f.sensors.findAll { !(it.status in ['ok', 'ns']) }*.name as Set<String>
+        List<Map> sensors = f.sensorFaults.findAll { !(it.name in flaggedThere) }
+        List<String> seen = f.chassisFaults.collect { "${it}: true".toString() } + sensors.collect { "${it.name} (${it.status}): ${it.reading}".toString() }
+        if (!seen && !(f.chassisRead && f.sensorsRead)) {
+            if (f.chassisRead || f.sensorsRead) {
+                add('HW-09', 'No chassis or sensor faults', Severity.HIGH, Status.NOT_CHECKED, h.name,
+                        "cannot tell: ${f.sensorsRead ? 'the chassis status' : 'the sensor list'} was not read to its end".toString(), 'none', 'plugin')
+            }
+            return   // nothing read is not "no faults"
+        }
+        boolean critical = f.chassisFaults || sensors.any { it.status in SENSOR_CRITICAL || it.reading =~ /(?i)fail|fault|ierr|non-recoverable/ }
+        add('HW-09', 'No chassis or sensor faults', Severity.HIGH, critical ? Status.FAIL : (sensors ? Status.WARN : Status.PASS), h.name,
+                seen ? seen.take(6).join('; ') : 'none', 'none', 'plugin', null, Tier.NONE,
+                seen ? 'A hardware fault can take this host down, and an unclean failure stalls every GFS2 datastore. Read it on the controller, and move VMs off if it is real.' : null)
     }
 
     /** Serious events still asserted within the window. The host's own NOW decides "recent", since BMC dates are mm/dd/yy. */
@@ -1664,8 +1712,8 @@ class HealthChecker {
         }
         hs.findAll { it.facts.mode == 'full' }.each { Host h ->
             if (h.facts.ipmiToolPresent == false) {
-                add('FEN-01', 'Host management controller known', Severity.LOW, Status.NOT_CHECKED, h.name, NO_IPMITOOL, 'configured', 'plugin', null, Tier.NONE,
-                        'This host may well have a management controller: the plugin reads it through ipmitool, which Morpheus-built hosts do not include. Without one there is no out-of-band way to prove a failed host is powered off.')
+                add('FEN-01', 'Host management controller known', Severity.LOW, Status.NOT_CHECKED, h.name, NO_IPMITOOL, 'configured', 'plugin', INSTALL_FIX, Tier.SAFE,
+                        'This host may well have a management controller: the plugin reads it through ipmitool, which Morpheus-built 1.3 hosts do not include. Without one there is no out-of-band way to prove a failed host is powered off.')
             } else {
                 add('FEN-01', 'Host management controller known', Severity.LOW, h.facts.bmcIp && h.facts.bmcIp != '0.0.0.0' ? Status.PASS : Status.WARN, h.name, h.facts.bmcIp ?: 'none', 'configured', 'plugin', null, Tier.NONE,
                         h.facts.bmcIp ? null : 'Without one there is no out-of-band way to prove this host is powered off when it fails.')

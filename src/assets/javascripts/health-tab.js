@@ -406,6 +406,66 @@
       box.appendChild(d);
     }
 
+    /** The host's management controller, read now through ipmitool: status, inventory, network and recent events, and the way to install the tool or reset the controller. */
+    function controllerPanel(box, host) {
+      box.innerHTML = ''; box.appendChild(el('div', { 'class': 'hh-panel hh-muted', text: 'Reading the management controller of ' + host + '…' }));
+      call('controller', { host: host }).then(function (b) { renderController(box, host, b); }, function (e) { box.innerHTML = ''; box.appendChild(el('div', { 'class': 'hh-panel hh-err', text: e.message })); });
+    }
+    function kvTable(pairs) {
+      var rows = pairs.filter(function (p) { return p[1] != null && p[1] !== ''; });
+      return rows.length ? table(['', ''], rows) : el('div', { 'class': 'hh-muted', text: 'Nothing read.' });
+    }
+    function installButton(box, host) {
+      if (!canFix()) return null;
+      return el('div', { 'class': 'hh-row' }, [btn('Install ipmitool', function (ev) {
+        if (!window.confirm('Install ipmitool on ' + host + ' and load its driver?\n\nOnly new packages, from the repositories the host already uses: it refuses if anything else would be upgraded or removed. No effect on the cluster.')) return;
+        ev.target.disabled = true;
+        call('fix', { host: host, key: 'ipmitool-install' }, true).then(function (j) { follow(j, function () { controllerPanel(box, host); }); }, function (e) { window.alert(e.message); ev.target.disabled = false; });
+      }), el('span', { 'class': 'hh-tier', text: TIER.SAFE + '; never automatic' })]);
+    }
+    function renderController(box, host, b) {
+      box.innerHTML = '';
+      var d = el('div', { 'class': 'hh-panel' }, [el('strong', { text: host + ': management controller' })]);
+      box.appendChild(d);
+      if (!b.installed) {
+        d.appendChild(el('div', { text: 'ipmitool is not installed on ' + host + ', so the plugin cannot read its management controller. Morpheus-built 1.3 hosts do not include it.' }));
+        d.appendChild(el('div', {}, [installButton(box, host)]));   // el skips the null a user who cannot fix gets
+        return;
+      }
+      if (!b.answered) {
+        d.appendChild(el('div', { 'class': 'hh-err', text: 'ipmitool is installed, but no management controller answered. Its driver may not be loaded, which Install also does, or the host has none, as a virtual machine does.' }));
+        d.appendChild(el('div', {}, [installButton(box, host)]));
+      }
+      var c = b.controller || {}, ch = b.chassis || {}, log = b.eventLog || {}, wd = b.watchdog || {}, s = b.sensors || {}, inv = b.inventory || {}, n = b.network || {};
+      var faults = (ch.faults || []).length ? el('span', { 'class': 'st-FAIL', text: ch.faults.join(', ') }) : 'none';
+      var problems = (s.problems || []).length ? el('span', { 'class': 'st-WARN', text: s.problems.map(function (p) { return p.name + ' (' + p.status + '): ' + p.reading; }).join('; ') }) : 'none';
+      d.appendChild(el('h4', { text: 'Status' }));
+      d.appendChild(kvTable([['Controller', [c.manufacturer, c.firmware ? 'firmware ' + c.firmware : null, c.ipmiVersion ? 'IPMI ' + c.ipmiVersion : null].filter(Boolean).join(', ')],
+        ['Self-test', c.selftest ? el('span', { 'class': c.selftest === 'passed' ? 'st-PASS' : (c.selftest === 'not implemented' ? 'hh-muted' : 'st-FAIL'), text: c.selftest }) : null],
+        ['Host power', ch.power], ['Power restore policy', ch.restorePolicy], ['Chassis faults', b.chassis ? faults : null], ['Chassis intrusion', ch.intrusion],
+        ['Sensors', s.ok != null ? s.ok + ' ok, ' + s.notReading + ' not fitted or not reading' : null], ['Sensors not ok', b.sensors ? problems : null],
+        ['Event log', log.entries != null ? log.entries + ' entries, ' + (log.percentUsed || '?') + ' used' + (log.overflow === 'true' ? ', overflowed' : '') + (log.lastAdded ? ', last ' + log.lastAdded : '') : null],
+        ['Watchdog', [wd.state, wd.action].filter(Boolean).join(', ')], ['ipmitool', b.version]]));
+      d.appendChild(el('h4', { text: 'Inventory' }));
+      d.appendChild(kvTable([['Server', [inv.manufacturer, inv.product || inv.productName].filter(Boolean).join(' ')], ['Serial / service tag', inv.serial || inv.productSerial],
+        ['Board', inv.board], ['Board serial', inv.boardSerial], ['Part number', inv.partNumber], ['Chassis serial', inv.chassisSerial], ['Board made', inv.made], ['BIOS', inv.bios]]));
+      d.appendChild(el('h4', { text: 'Controller network' }));
+      d.appendChild(kvTable([['Address', n.ip ? n.ip + (n.mask ? ' / ' + n.mask : '') : null], ['Assigned by', n.source], ['Gateway', n.gateway], ['MAC', n.mac], ['VLAN', n.vlan]]));
+      if ((log.recent || []).length) {
+        d.appendChild(el('h4', { text: 'Latest events' }));
+        d.appendChild(el('pre', { text: log.recent.join('\n') }));
+      }
+      if (b.answered && canFix()) {
+        d.appendChild(el('h4', { text: 'Reset the controller' }));
+        d.appendChild(el('div', { 'class': 'hh-hint', text: 'Restarts the management controller (iDRAC, iLO) only, not the host or its VMs. It is out of reach for a few minutes, and fans may speed up meanwhile. Refused during a GFS2 freeze, when the controller may be what proves a host is off.' }));
+        var typed = el('input', { type: 'text', placeholder: 'Type ' + host });
+        d.appendChild(el('div', { 'class': 'hh-row' }, [typed, btn('Reset controller', function (ev) {
+          ev.target.disabled = true;
+          call('controller-reset', { host: host, confirm: typed.value }, true).then(function (j) { follow(j, function () { ev.target.disabled = false; }); }, function (e) { window.alert(e.message); ev.target.disabled = false; });
+        }, 'btn-danger')]));
+      }
+    }
+
     function hpeBad(c) { return c.status === 'FAIL' || c.status === 'WARN'; }
     /** One host's line of HPE's checks, opened for the list, problems first. Text only, and odd output costs that host its line, never the tab. */
     function hpeHost(h) {
@@ -447,6 +507,7 @@
             ev.target.disabled = true;
             call('vlan-test', { host: h.name }, true).then(function (j) { follow(j, function () { ev.target.disabled = false; }); }, function (e) { window.alert(e.message); ev.target.disabled = false; });
           }) : null,
+          btn('Management controller', function () { controllerPanel(panel, h.name); }),
           btn('Raw', function () {
             out.textContent = 'Reading ' + h.name + '…';
             call('raw', { host: h.name }).then(function (r) { out.textContent = r.output; }, function (e) { out.textContent = e.message; });

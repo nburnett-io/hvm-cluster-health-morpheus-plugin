@@ -809,12 +809,34 @@ class HealthCheckerSpec extends Specification {
         then:
         rs.findAll { it.id == 'FEN-01' }*.status.every { it == Status.NOT_CHECKED }
         rs.findAll { it.id == 'FEN-01' }*.observed.every { it == 'cannot tell: ipmitool not installed' }
-        ['HW-01', 'HW-03', 'HW-04'].every { String id -> rs.findAll { it.id == id }*.status == [Status.NOT_CHECKED] * 3 }
+        ['HW-01', 'HW-03', 'HW-04', 'HW-08'].every { String id -> rs.findAll { it.id == id }*.status == [Status.NOT_CHECKED] * 3 }
         rs.find { it.id == 'HW-01' }.hint.contains('Install it')
         ready['Hardware'].status == 'NOT_CHECKED'
-        ready['Hardware'].notChecked == ['HW-01', 'HW-03', 'HW-04']
+        ready['Hardware'].notChecked == ['HW-01', 'HW-03', 'HW-04', 'HW-08']
         'FEN-01' in ready['High availability'].notChecked
         org.hvmhealth.morpheus.HealthMonitor.alarmsFor(1L, 'c', rs.findAll { it.status == Status.NOT_CHECKED }) == []
+        !rs.any { it.id == 'HW-09' }
+    }
+
+    def 'every finding a missing ipmitool leaves unread offers the install, as a safe fix'() {
+        when:
+        List<HealthChecker.Result> unread = check(Fixture.timesyncd()).findAll { it.observed == HealthChecker.NO_IPMITOOL }
+
+        then:
+        unread*.id as Set == ['FEN-01', 'HW-01', 'HW-03', 'HW-04', 'HW-08'] as Set
+        unread.every { it.fix == 'ipmitool-install' && it.tier == HealthChecker.Tier.SAFE }
+    }
+
+    def 'ipmitool with no controller answering is said once, in HW-08, with the fix that also loads the driver'() {
+        when:
+        List<HealthChecker.Result> rs = check(Fixture.timesyncd(null) { String t, String h -> t.replace('IPMITOOL=', 'IPMITOOL=/usr/bin/ipmitool') })
+        HealthChecker.Result r = rs.find { it.id == 'HW-08' }
+
+        then:
+        r.status == Status.NOT_CHECKED
+        r.observed == 'cannot tell: ipmitool is installed, but no management controller answered'
+        r.fix == 'ipmitool-install'
+        !rs.any { it.id == 'HW-09' }
     }
 
     def 'with ipmitool, no management controller is the real answer none, and no sensors is said'() {
@@ -831,7 +853,7 @@ class HealthCheckerSpec extends Specification {
 
     def 'a quick check, which does not look for ipmitool, says nothing about it'() {
         expect:
-        !check(Fixture.timesyncd(null) { String t, String h -> t.replace('MODE=full', 'MODE=quick').replaceAll(/(?s)@@journals.*?@@end/, '@@end') }).any { it.id in ['FEN-01', 'HW-01', 'HW-03', 'HW-04'] }
+        !check(Fixture.timesyncd(null) { String t, String h -> t.replace('MODE=full', 'MODE=quick').replaceAll(/(?s)@@journals.*?@@end/, '@@end') }).any { it.id in ['FEN-01', 'HW-01', 'HW-03', 'HW-04', 'HW-08', 'HW-09'] }
     }
 
     def 'a management controller ipmitool reads still passes'() {

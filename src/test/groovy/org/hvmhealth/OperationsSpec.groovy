@@ -807,6 +807,52 @@ END
         hwCheck("SEL=  21 | ${recent} | 06:45:28 EDT | Temp | Upper Non-critical going high | Asserted").find { it.id == 'HW-04' }.status == Status.PASS
     }
 
+    /** What the probe prints for a controller that answered, as on a 2.0 host with an iDRAC, plus {@code extra}. */
+    private static List<HealthChecker.Result> bmcCheck(String extra, String selftest = 'passed', String used = '3', String overflow = 'false') {
+        String bmc = "WATCHDOG=/dev/watchdog\nIPMITOOL=/usr/bin/ipmitool\nBMC_SELFTEST=${selftest}\nCHASSIS=Power Overload|false\nCHASSIS=Main Power Fault|false\n" +
+                "CHASSIS=Power Control Fault|false\nCHASSIS=Drive Fault|false\nCHASSIS=Cooling/Fan Fault|false\nSEL_USED=${used}\nSEL_OVERFLOW=${overflow}\nSDR_READ=1\n${extra}"
+        check(Fixture.input([Fixture.host('hvm-node02', Fixture.facts('probe-healthy', 'hvm-node02') {
+            it.replace('WATCHDOG=/dev/watchdog', bmc).replace('@@end', hw('SDR=Temperature|Inlet Temp|cr|47 degrees C')).replace(' 5    vm-one   running', '')
+        })], Fixture.LAYOUT_20))
+    }
+
+    def 'the controller: a failed self-test fails, a log near full or overflowed warns, a healthy one passes'() {
+        expect:
+        bmcCheck('').find { it.id == 'HW-08' }.with { it.status == Status.PASS && it.observed == 'self-test passed, event log 3% used' }
+        bmcCheck('', 'device error').find { it.id == 'HW-08' }.status == Status.FAIL
+        bmcCheck('', 'passed', '90').find { it.id == 'HW-08' }.status == Status.WARN
+        bmcCheck('', 'passed', '12', 'true').find { it.id == 'HW-08' }.observed == 'self-test passed, event log 12% used, overflowed'
+        // a controller without the command has no self-test, which is not a failed one
+        bmcCheck('', 'not implemented').find { it.id == 'HW-08' }.with { it.status == Status.PASS && it.observed.startsWith('self-test not implemented') }
+    }
+
+    def 'a discrete sensor whose reading names a failure is caught though its status column says ok'() {
+        expect:
+        bmcCheck('SDR_BAD=Status|ok|Presence detected, Failure detected').find { it.id == 'HW-09' }.with { it.status == Status.FAIL && it.observed.contains('Failure detected') }
+        bmcCheck('SDR_BAD=Drive 0|ok|Drive Present, Predictive Failure').find { it.id == 'HW-09' }.status == Status.FAIL
+        bmcCheck('SDR_BAD=CPU1 Status|ok|IERR').find { it.id == 'HW-09' }.status == Status.FAIL
+    }
+
+    def 'no fault seen in a sensor list cut short is not checked, never a pass'() {
+        expect:
+        bmcCheck('').find { it.id == 'HW-09' }.status == Status.PASS
+        check(Fixture.input([Fixture.host('hvm-node02', Fixture.facts('probe-healthy', 'hvm-node02') {
+            it.replace('WATCHDOG=/dev/watchdog', 'IPMITOOL=/usr/bin/ipmitool\nBMC_SELFTEST=passed\nCHASSIS=Drive Fault|false')
+        })], Fixture.LAYOUT_20)).find { it.id == 'HW-09' }.with { it.status == Status.NOT_CHECKED && it.observed == 'cannot tell: the sensor list was not read to its end' }
+    }
+
+    def 'chassis and sensor faults: a set flag or a critical sensor fails, a non-critical one warns, and HW-03 keeps its own sensors'() {
+        expect:
+        bmcCheck('').find { it.id == 'HW-09' }.with { it.status == Status.PASS && it.observed == 'none' }
+        // the temperature HW-03 already fails on is not counted twice
+        bmcCheck('SDR_BAD=Inlet Temp|cr|47 degrees C').find { it.id == 'HW-09' }.status == Status.PASS
+        bmcCheck('SDR_BAD=Fan1A|lcr|0 RPM').find { it.id == 'HW-09' }.with { it.status == Status.FAIL && it.observed == 'Fan1A (lcr): 0 RPM' }
+        bmcCheck('SDR_BAD=Voltage 1|nc|Upper Non-critical').find { it.id == 'HW-09' }.status == Status.WARN
+        check(Fixture.input([Fixture.host('hvm-node02', Fixture.facts('probe-healthy', 'hvm-node02') {
+            it.replace('WATCHDOG=/dev/watchdog', 'IPMITOOL=/usr/bin/ipmitool\nBMC_SELFTEST=passed\nCHASSIS=Cooling/Fan Fault|true')
+        })], Fixture.LAYOUT_20)).find { it.id == 'HW-09' }.with { it.status == Status.FAIL && it.observed == 'Cooling/Fan Fault: true' }
+    }
+
     def 'firmware is compared among identical servers, not across models'() {
         given:
         HealthChecker.Host a = hwHost('hvm-node01', 'NIC=eno1|9.5|10000')

@@ -9,9 +9,10 @@ import org.hvmhealth.checks.HealthChecker
 import org.hvmhealth.fixes.Fixes
 import org.hvmhealth.fixes.Preflight
 import org.hvmhealth.fixes.VlanTest
+import org.hvmhealth.model.Bmc
 import org.hvmhealth.model.HostFacts
 
-/** The two longer operations on a host in maintenance mode: the VLAN traffic test, and removing it from the cluster. */
+/** The longer operations on one host: the VLAN traffic test and removal from the cluster (both in maintenance mode), and its management controller. */
 class HostOps {
     /** Under a minute when all is well. Morpheus gives up on a hung unmount at 5 minutes, and what follows takes a few more. */
     private static final long REMOVAL_WAIT_MS = 600_000L
@@ -20,6 +21,41 @@ class HostOps {
 
     /** Between reads of a running VLAN test, and the least time back on the original uplink between its runs. Not final, for the tests. */
     static long pollMs = 8000L
+
+    /** The host's management controller, read now. Read-only, so an operator with read access may look. */
+    static Map controller(HealthContext ctx, String host) {
+        ComputeServer s = ctx.hosts.find { it.name == host }
+        Map r
+        try {
+            r = ctx.run(s, Bmc.READ_SCRIPT, 90)
+        } catch (Exception ignored) {
+            throw new IllegalStateException("${host} did not answer within 90 s. It may be down, or its agent stopped.")
+        }
+        [host: host] + Bmc.parse(r.output as String)
+    }
+
+    /** Restarts the controller, never the host. Refused during a freeze, when a controller may be what proves a failed host is off. */
+    static Map resetController(MorpheusContext morpheus, HealthContext ctx, String host, User who, List<String> progress, Map settings) {
+        progress << 'Reading the current state of every host'
+        HealthChecker.Input in_ = ctx.input(ctx.probe('quick'), settings?.siteStandards as String)
+        List<String> frozen = in_.hosts.findAll { it.facts?.frozen }*.name as List<String>
+        if (frozen) {
+            Audit.warn(morpheus, who, ctx.cluster, 'controller reset refused', [host: host, why: "frozen: ${frozen.join(', ')}"])
+            throw new IllegalStateException("Not run: a DLM lockspace is stopped on ${frozen.join(', ')}. A management controller may be needed now to prove a failed host is off, so none is reset during a freeze.")
+        }
+        ComputeServer s = ctx.hosts.find { it.name == host }
+        Audit.warn(morpheus, who, ctx.cluster, 'controller reset started', [host: host])
+        Map r = ctx.run(s, Bmc.RESET_SCRIPT, 60)
+        (r.output as String)?.readLines()?.findAll { it.trim() }?.take(10)?.each { progress << "  ${it}".toString() }
+        if (r.exit != 0) {
+            Audit.warn(morpheus, who, ctx.cluster, 'controller reset failed', [host: host, exit: r.exit])
+            throw new IllegalStateException("${host}: the controller was not reset (exit ${r.exit})")
+        }
+        // not waited for here: a job holds the cluster, and a fence acknowledgement or a freeze check must not wait minutes behind a controller
+        progress << "${host}: reset sent. The controller restarts on its own while the host keeps running, usually in 2 to 5 minutes: open its panel again then. If it does not come back, check it from its own web page.".toString()
+        Audit.warn(morpheus, who, ctx.cluster, 'controller reset sent', [host: host])
+        [host: host]
+    }
 
     /** Runs the test detached, then reads its result, surviving the agent losing the host while uplinks change. Split into runs short enough for corosync's token. */
     static Map vlanTest(MorpheusContext morpheus, HealthContext ctx, String host, User who, List<String> progress, Map settings) {

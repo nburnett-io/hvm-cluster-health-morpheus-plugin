@@ -42,7 +42,7 @@ class HealthMonitor {
     static final Map<Long, Map> LAST = new ConcurrentHashMap<>()
     private static final Map<Long, List<HealthChecker.Result>> LAST_FULL = new ConcurrentHashMap<>()
     /** Findings only a full check produces (ring and packet tests, journal counts, management controllers). */
-    static final Set<String> FULL_ONLY = ['NET-03', 'NET-09', 'MIG-02', 'GFS-06', 'FEN-01', 'FEN-02', 'HB-02', 'HW-01', 'HW-02', 'HW-03', 'HW-04', 'HW-05', 'HW-06', 'HW-07', 'HST-02', 'HST-03', 'STO-07', 'STO-13', 'HPE-01',
+    static final Set<String> FULL_ONLY = ['NET-03', 'NET-09', 'MIG-02', 'GFS-06', 'FEN-01', 'FEN-02', 'HB-02', 'HW-01', 'HW-02', 'HW-03', 'HW-04', 'HW-05', 'HW-06', 'HW-07', 'HW-08', 'HW-09', 'HST-02', 'HST-03', 'STO-07', 'STO-13', 'HPE-01',
                                            'PKG-04', 'KRN-01', 'KRN-02', 'KRN-03', 'NET-17', 'NET-18', 'NET-19',
                                            'SEC-01', 'SEC-02', 'SEC-03', 'SEC-04', 'SEC-05', 'SEC-06', 'VM-07'] as Set
     private static final Map<String, Long> ATTEMPTS = new ConcurrentHashMap<>()
@@ -636,7 +636,7 @@ class HealthMonitor {
     /** The findings an automatic pass may act on, given the settings and the guards. */
     static List<HealthChecker.Result> autoFixable(HealthChecker.Input in_, List<HealthChecker.Result> rs, Map settings, long now = System.currentTimeMillis()) {
         rs.findAll { HealthChecker.Result r ->
-            if (!r.fix || !r.host || !(r.status in [HealthChecker.Status.FAIL, HealthChecker.Status.WARN])) {
+            if (!r.fix || !r.host || r.fix in Fixes.MANUAL_ONLY || !(r.status in [HealthChecker.Status.FAIL, HealthChecker.Status.WARN])) {
                 return false
             }
             if (autoFixRefusal(r.tier, in_, settings) || Fixes.blockers(r.tier, in_, r.host)) {
@@ -681,7 +681,8 @@ class HealthMonitor {
         Fixes.Fix fix = Fixes.fix(key, f, (in_.standards.val('ntpServers') ?: []) as List<String>)
         List<String> blocked = Fixes.blockers(fix.tier, in_, host)
         if (automatic) {
-            String refused = autoFixRefusal(fix.tier, in_, plugin ? ClusterHealthPlugin.readSettings(morpheus, plugin) : settings)
+            String refused = key in Fixes.MANUAL_ONLY ? "${key} is only ever started by a person".toString()
+                    : autoFixRefusal(fix.tier, in_, plugin ? ClusterHealthPlugin.readSettings(morpheus, plugin) : settings)
             blocked = refused ? blocked + refused : blocked
         }
         if (blocked) {
@@ -690,7 +691,7 @@ class HealthMonitor {
         }
         progress << "${host}: ${fix.title}".toString()
         Audit.info(morpheus, who, ctx.cluster, "fix started: ${key}", [host: host, tier: fix.tier.name()])
-        Map r = ctx.run(ctx.hosts.find { it.name == host }, fix.script)
+        Map r = ctx.run(ctx.hosts.find { it.name == host }, fix.script, fix.timeoutSec ?: HealthContext.FIX_TIMEOUT_SEC)
         (r.output as String)?.readLines()?.findAll { it.trim() }?.take(40)?.each { progress << "  ${it}".toString() }
         if (r.exit != 0) {
             Audit.warn(morpheus, who, ctx.cluster, "fix failed: ${key}", [host: host, exit: r.exit])

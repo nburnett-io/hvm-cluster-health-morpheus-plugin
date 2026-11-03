@@ -22,9 +22,14 @@ class Fixes {
         String title
         Tier tier
         String script
+        /** Seconds the host gets; null is the usual limit. */
+        Long timeoutSec
     }
 
     static final String HEADER = '#!/bin/bash\nset -euo pipefail\nexport LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin\n'
+
+    /** Fixes a person starts and an automatic pass never does, whatever its tier: installing software is the operator's choice. */
+    static final Set<String> MANUAL_ONLY = ['ipmitool-install'] as Set
 
     /**
      * @param ntpServers the cluster's time sources from the standards, for the ntp-sources fix
@@ -78,6 +83,10 @@ class Fixes {
                         '  if [ -w "$s" ]; then echo "- - -" > "$s"; fi\n' +
                         'done\n' +
                         'multipathd reconfigure\nsleep 5\nmultipath -ll | grep -cE "active ready" | sed "s/^/healthy paths: /"\n')
+            case 'ipmitool-install':
+                // the tool reads the management controller through a local driver: nothing the cluster or a VM uses
+                // its steps are bounded to about 4 minutes in all, so the host's own answer comes back rather than a timeout
+                return new Fix(key, 'Install ipmitool and load its driver', Tier.SAFE, HEADER + IPMITOOL_INSTALL, 300L)
             default:
                 throw new IllegalArgumentException("Unknown fix ${key}")
         }
@@ -133,6 +142,51 @@ corosync-quorumtool -s 2>/dev/null | grep -qE '^Quorate: +Yes' || { echo 'corosy
 systemctl enable --now dlm
 echo "corosync $(systemctl is-active corosync), dlm $(systemctl is-active dlm)"
 echo 'This does not mount GFS2. Reboot the host while it is still in maintenance mode, which brings GFS2 back. Leaving maintenance mode without that can make the agent force a reboot.'
+'''
+
+    /**
+     * New packages only, from the repositories the host already has: an install that would upgrade or remove anything else is refused, so
+     * it cannot carry a hypervisor's libraries forward by the way. The lists are refreshed only when they do not offer ipmitool. The driver
+     * is set to load at boot only when this had to load it. needrestart is held off: after any apt run it restarts every service still on an
+     * old library, whoever updated it, and that can be corosync, dlm or libvirt with GFS2 mounted. Seen live: it ran after this install.
+     */
+    private static final String IPMITOOL_INSTALL = '''export DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 NEEDRESTART_MODE=l
+had_dev=0; ls /dev/ipmi[0-9]* >/dev/null 2>&1 && had_dev=1
+if command -v ipmitool >/dev/null; then
+  echo "ipmitool is already installed: $(dpkg-query -W -f='${Version}' ipmitool 2>/dev/null || echo 'not from a package')"
+else
+  command -v apt-get >/dev/null || { echo 'REFUSED: this host has no apt-get'; exit 1; }
+  plan() { apt-get -s -o Debug::NoLocking=1 install --no-install-recommends ipmitool 2>&1 || true; }
+  p="$(plan)"
+  if ! grep -q '^Inst ipmitool ' <<<"$p"; then
+    echo 'ipmitool is not in the package lists: refreshing them'
+    timeout -k 5 60 apt-get -q -o DPkg::Lock::Timeout=30 update >/dev/null || { echo 'REFUSED: the package lists could not be refreshed: this host may have no route to its repositories'; exit 1; }
+    p="$(plan)"
+  fi
+  grep -q '^Inst ipmitool ' <<<"$p" || { echo 'REFUSED: no repository this host uses offers ipmitool'; tail -3 <<<"$p"; exit 1; }
+  if grep -qE '^(Remv|Purg) |^Inst [^ ]+ \\[' <<<"$p"; then
+    echo 'REFUSED: installing ipmitool here would also upgrade or remove other packages:'
+    grep -E '^(Remv|Purg) |^Inst [^ ]+ \\[' <<<"$p" | head -10
+    exit 1
+  fi
+  echo "installing $(grep -E '^Inst ' <<<"$p" | cut -d' ' -f2 | xargs)"
+  # never under a timeout: dpkg killed partway leaves the package system needing repair
+  apt-get -q -y -o DPkg::Lock::Timeout=30 -o Dpkg::Options::=--force-confold install --no-install-recommends ipmitool >/dev/null
+  echo "installed ipmitool $(dpkg-query -W -f='${Version}' ipmitool)"
+fi
+if [ "$had_dev" = 0 ]; then
+  timeout -k 2 30 modprobe ipmi_devintf 2>/dev/null || true
+  timeout -k 2 30 modprobe ipmi_si 2>/dev/null || true
+  if ls /dev/ipmi[0-9]* >/dev/null 2>&1; then
+    printf 'ipmi_devintf\\nipmi_si\\n' > /etc/modules-load.d/hvm-cluster-health-ipmi.conf
+    echo 'loaded the IPMI driver, and set it to load at boot'
+  fi
+fi
+if o="$(timeout -k 2 15 ipmitool mc info 2>/dev/null)"; then
+  echo "management controller: $(awk -F': *' '/^Manufacturer Name/{m=$2} /^Firmware Revision/{f=$2} END{print m ", firmware " f}' <<<"$o")"
+else
+  echo 'ipmitool is installed, but no management controller answered: this host may have none, as a virtual machine does'
+fi
 '''
 
     /** Why a change cannot run on this host now; empty means it may. SAFE fixes need only an up-to-date probe. */

@@ -61,6 +61,8 @@ class HealthController implements PluginController {
                 Route.build('/hvm-health/availability', 'availability', read),
                 Route.build('/hvm-health/availability-export', 'availabilityExport', read),
                 Route.build('/hvm-health/vlan-test', 'vlanTest', full),
+                Route.build('/hvm-health/controller', 'controller', read),
+                Route.build('/hvm-health/controller-reset', 'controllerReset', full),
                 Route.build('/hvm-health/window-start', 'windowStart', full),
                 Route.build('/hvm-health/window-end', 'windowEnd', full),
                 Route.build('/hvm-health/remove-host', 'removeHost', emergency),
@@ -357,6 +359,38 @@ class HealthController implements PluginController {
             User who = m.user
             ok(Jobs.start("VLAN test: ${host}".toString(), ctx.cluster.id, user(m)) { List<String> progress ->
                 HostOps.vlanTest(morpheus, ctx, host, who, progress, s)
+            }.toMap())
+        }
+    }
+
+    /** Its status, inventory and network, read now through ipmitool. Read-only. */
+    def controller(ViewModel<Map> m) {
+        guarded {
+            HealthContext ctx = operatorCtx(m)
+            String host = p(m).host as String
+            if (!host || !ctx.hosts.any { it.name == host }) {
+                throw new IllegalArgumentException("${host} is not in cluster ${ctx.cluster.name}")
+            }
+            ok(HostOps.controller(ctx, host))
+        }
+    }
+
+    /** Restarts the host's management controller, not the host. Confirmed by typing the host's name. */
+    def controllerReset(ViewModel<Map> m) {
+        guarded {
+            postOnly(m)
+            HealthContext ctx = operatorCtx(m)
+            String host = p(m).host as String
+            if (!host || !ctx.hosts.any { it.name == host }) {
+                throw new IllegalArgumentException("${host} is not in cluster ${ctx.cluster.name}")
+            }
+            if (!(p(m).confirm as String)?.equalsIgnoreCase(host)) {
+                throw new IllegalArgumentException("Type the host name, ${host}, to confirm")
+            }
+            Map s = settings()
+            User who = m.user
+            ok(Jobs.start("controller reset: ${host}".toString(), ctx.cluster.id, user(m)) { List<String> progress ->
+                HostOps.resetController(morpheus, ctx, host, who, progress, s)
             }.toMap())
         }
     }

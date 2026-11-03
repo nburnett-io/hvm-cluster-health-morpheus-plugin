@@ -3,6 +3,7 @@ package org.hvmhealth
 import org.hvmhealth.fixes.Fixes
 import org.hvmhealth.fixes.Preflight
 import org.hvmhealth.fixes.VlanTest
+import org.hvmhealth.model.Bmc
 import org.hvmhealth.model.HostFacts
 import org.hvmhealth.morpheus.HealthContext
 import spock.lang.Requires
@@ -67,6 +68,7 @@ class ScriptsSpec extends Specification {
         [HealthContext.probeScript('quick'), HealthContext.probeScript('full'),
          Fixes.fix('ntp-sources', chrony, ['192.0.2.123']).script, Fixes.fix('ntp-sources', timesyncd, ['192.0.2.123']).script,
          Fixes.fix('ntp-enable', chrony).script, Fixes.fix('service-enable', chrony).script, Fixes.fix('rejoin', chrony).script, Fixes.fix('multipath-reconfigure', chrony).script,
+         Fixes.fix('ipmitool-install', chrony).script, Bmc.READ_SCRIPT, Bmc.RESET_SCRIPT,
          Fixes.fenceAckScript(1), Preflight.unmountScript(), launch, vlanBody(), VlanTest.READ_SCRIPT]
     }
 
@@ -181,6 +183,69 @@ esac''')
         'echo "name x"; echo "flags 0x00000000"'   | 0
         'exit 1'                                   | 1
         'echo "flags 0x00000004 kern_stop"'        | 1
+    }
+
+    // ------------------------------------------------------------------ installing ipmitool
+
+    /** The install with apt answering {@code plan} to its simulation. Absent unless {@code have}: whatever this machine has is not looked for. */
+    private String install(String plan, boolean have = false) {
+        new File(dir, 'plan').text = plan
+        stub('apt-get', "case \" \$* \" in *' -s '*) cat ${dir}/plan ;; esac\nexit 0")
+        stub('dpkg-query', "printf '1.0'")
+        stub('modprobe', 'exit 0')
+        String s = Fixes.fix('ipmitool-install', new HostFacts()).script.replace('PATH=/usr/sbin', "PATH=${stubs}:/usr/sbin").replace('/etc/modules-load.d/', "${dir}/")
+        if (have) {
+            stub('ipmitool', 'exit 1')
+            return s
+        }
+        s.replace('command -v ipmitool >/dev/null', 'command -v hh-no-such-tool >/dev/null')
+    }
+
+    private List<String> realInstalls() {
+        calls().findAll { it.startsWith('apt-get') && it.contains(' install ') && !it.contains(' -s ') }
+    }
+
+    def 'an install that would upgrade another package is refused before anything is installed'() {
+        when:
+        Map r = run(install('Inst libc6 [2.39-0ubuntu8] (2.39-0ubuntu8.3 Ubuntu:24.04/noble-updates [amd64])\nInst ipmitool (1.8.19 Ubuntu:24.04/noble-updates [amd64])\n'))
+
+        then:
+        r.exit == 1
+        r.output.contains('would also upgrade or remove other packages')
+        r.output.contains('Inst libc6 [2.39-0ubuntu8]')
+        realInstalls() == []
+    }
+
+    def 'an install of new packages only goes ahead, and names them'() {
+        when:
+        Map r = run(install('Inst freeipmi-common (1.6.13 Ubuntu:24.04/noble-updates [all])\nInst ipmitool (1.8.19 Ubuntu:24.04/noble-updates [amd64])\n'))
+
+        then:
+        r.exit == 0
+        r.output.contains('installing freeipmi-common ipmitool')
+        realInstalls().size() == 1
+        !calls().any { it.startsWith('apt-get') && it.contains(' update') }
+    }
+
+    def 'lists that do not offer it are refreshed once, and then it is refused'() {
+        when:
+        Map r = run(install(''))
+
+        then:
+        r.exit == 1
+        r.output.contains('no repository this host uses offers ipmitool')
+        calls().count { it.startsWith('apt-get') && it.contains(' update') } == 1
+        realInstalls() == []
+    }
+
+    def 'with ipmitool already there apt is never run'() {
+        when:
+        Map r = run(install('Inst ipmitool (1.8.19 x [amd64])\n', true))
+
+        then:
+        r.exit == 0
+        r.output.contains('ipmitool is already installed: 1.0')
+        !calls().any { it.startsWith('apt-get') }
     }
 
     // ------------------------------------------------------------------ the VLAN test

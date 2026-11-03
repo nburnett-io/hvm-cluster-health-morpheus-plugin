@@ -210,9 +210,9 @@ What every check id means. The tab shows the same text: click an id, or press He
 
 ### FEN-01: Host management controller known
 
-- **What it looks at:** Full check only. Reads the management controller's address with ipmitool. WARN: none found, which can also mean the tool is there without its driver. NOT CHECKED: ipmitool is not installed, as on Morpheus-built hosts, so the host may well have one.
+- **What it looks at:** Full check only. Reads the management controller's address with ipmitool. WARN: none found, which can also mean the tool is there without its driver. NOT CHECKED: ipmitool is not installed, as on Morpheus-built 1.3 hosts (2.0 hosts include it), so the host may well have one.
 - **Why it matters:** Without one there is no out-of-band way to prove a failed host is powered off.
-- **What to do:** Install ipmitool to let the plugin read it. WARN: check the controller is configured.
+- **What to do:** NOT CHECKED: the Fix button installs ipmitool and loads its driver (never automatic). WARN: check the controller is configured. Each host's Management controller panel shows its status, inventory and network.
 
 ### FEN-02: No SCSI fence agent from the 8.0.11/8.0.12 defect
 
@@ -410,9 +410,9 @@ What every check id means. The tab shows the same text: click an id, or press He
 
 ### HW-01: Power supplies healthy and redundant
 
-- **What it looks at:** Full check only. Reads power supply sensors with ipmitool. FAIL: a supply is failing. WARN: redundancy is not full. NOT CHECKED: no sensors read, or ipmitool is not installed, as on Morpheus-built hosts.
+- **What it looks at:** Full check only. Reads power supply sensors with ipmitool. FAIL: a supply is failing. WARN: redundancy is not full. NOT CHECKED: no sensors read, or ipmitool is not installed, as on Morpheus-built 1.3 hosts.
 - **Why it matters:** One power supply or feed failing takes this host down, and its cluster membership with it.
-- **What to do:** Check both supplies are cabled and the BMC redundancy policy is on. NOT CHECKED: install ipmitool.
+- **What to do:** Check both supplies are cabled and the BMC redundancy policy is on. NOT CHECKED: the Fix button installs ipmitool.
 
 ### HW-02: No memory errors
 
@@ -424,13 +424,13 @@ What every check id means. The tab shows the same text: click an id, or press He
 
 - **What it looks at:** Full check only. Reads temperature sensors with ipmitool. FAIL lists any not ok. NOT CHECKED: no sensors read, or ipmitool is not installed.
 - **Why it matters:** A sensor outside its limits is a warning about the host's hardware, which a cluster member depends on.
-- **What to do:** Check the host's cooling and the sensors listed. NOT CHECKED: install ipmitool.
+- **What to do:** Check the host's cooling and the sensors listed. NOT CHECKED: the Fix button installs ipmitool.
 
 ### HW-04: No serious hardware events recently
 
 - **What it looks at:** Full check only. Reads the last 40 entries of the hardware event log with ipmitool, for serious events still asserted within the site standard selDays. WARN lists them. NOT CHECKED: ipmitool is not installed. An empty log with the tool present is an answer, and gives no row.
 - **Why it matters:** A serious event can come before a host failure, and a host that fails uncleanly stalls every GFS2 datastore.
-- **What to do:** Read the events listed, on the host's management controller. NOT CHECKED: install ipmitool.
+- **What to do:** Read the events listed, on the host's management controller or its Management controller panel. NOT CHECKED: the Fix button installs ipmitool.
 
 ### HW-05: Uplinks in a bond at the same speed
 
@@ -449,6 +449,18 @@ What every check id means. The tab shows the same text: click an id, or press He
 - **What it looks at:** Full check only. Reads smartctl for the disks under /, and for physical disks behind a MegaRAID controller, each with its own result naming its slot: up to 24 within 40 s, only the megaraid entries of smartctl --scan, and never an iSCSI LUN, which the scan lists too. FAIL: SMART health is not good, or an NVMe critical warning, or an attribute with a WHEN_FAILED value other than a dash, on a boot disk as on one behind the controller. WARN: pending or uncorrectable sectors, or media errors. Reallocated sectors are only shown, as vendors encode them differently. NOT CHECKED: no smartctl, a RAID volume or virtual disk that hides SMART, or a disk behind the controller that gave no health or was not reached. A RAID volume says which physical disks were read instead when they are on its own controller. Seen: physical disks behind a MegaRAID controller read by hand with these commands, on one 2.0 host, and a boot card volume with no SMART. This check itself has not yet run on them. A physical boot disk has not been seen. Other controllers, such as HPE's cciss, have not been seen, and are not read.
 - **Why it matters:** A host that loses its boot disk leaves the cluster uncleanly, which stalls every GFS2 datastore until it is acknowledged. A RAID volume hides a failing disk behind it until the volume itself is at risk.
 - **What to do:** Replace this disk in a maintenance window. No smartctl: install smartmontools. A RAID volume with its physical disks read: go by their results. Any other RAID or virtual disk: read the physical disks with the controller's own tools.
+
+### HW-08: Management controller healthy
+
+- **What it looks at:** Full check only. Reads the management controller (iDRAC, iLO) through ipmitool: its self-test, and how full its event log is. FAIL: the self-test did not pass; a controller that answers "not implemented" has no self-test, which is not a failure. WARN: the event log is 90% full or has overflowed. NOT CHECKED: ipmitool is not installed, or it is and no controller answered, which can mean its driver is not loaded or there is no controller, as on a virtual machine. Seen on a 2.0 host with an iDRAC; a failing self-test and a full log have not been seen.
+- **Why it matters:** The controller is how a host's hardware faults are seen and how a failed host is proven off. One that fails its self-test may report nothing and refuse power commands, and a full log stops recording the events HW-04 reads.
+- **What to do:** FAIL: reset the controller from the host's Management controller panel (the host keeps running), and call the vendor if it still fails. WARN: save and clear the event log on the controller. NOT CHECKED: the Fix button installs ipmitool and loads its driver, and is never automatic.
+
+### HW-09: No chassis or sensor faults
+
+- **What it looks at:** Full check only. Reads the chassis fault flags (power overload, main power, power control, drive, cooling or fan) and every sensor through ipmitool. FAIL: a fault flag is set, or a sensor is critical or non-recoverable, or a discrete sensor names a failure, fault or IERR in its reading (ipmitool's status column judges thresholds only, so a failed power supply can still say ok). WARN: a sensor is non-critical, or names an error or a predictive failure. Sensors HW-01 or HW-03 already flag are left to them, and a sensor with no reading is not a fault. PASS only when both the chassis status and the whole sensor list were read; NOT CHECKED when one of them was cut short. No row when neither was read: HW-08 says so. Seen clean on a 2.0 host with an iDRAC; a raised fault has not been seen.
+- **Why it matters:** A failing fan, voltage or drive takes the host down sooner or later, and an unclean failure stalls every GFS2 datastore until it is acknowledged.
+- **What to do:** Read the fault on the controller or the host's Management controller panel. If it is real, move VMs off and plan the repair in a maintenance window.
 
 ## Kernel
 

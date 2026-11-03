@@ -68,6 +68,14 @@ class HostFacts {
     Map timesyncd
     /** Null when the probe did not look, as on a quick check. */
     Boolean ipmiToolPresent
+    /** From ipmitool, null when not read: the controller's self-test, how full its event log is, the chassis fault flags that are set, sensors not ok. */
+    String bmcSelftest
+    Integer selUsedPct
+    Boolean selOverflow
+    List<String> chassisFaults = []
+    boolean chassisRead
+    boolean sensorsRead                          // the whole sensor list was read, so none listed means none failing
+    List<Map> sensorFaults = []                  // [name, status, reading]
     /** The Morpheus agent, from wherever this host keeps it. */
     String agentVersion
     boolean ringDynamic                          // the cluster network address came from DHCP
@@ -398,6 +406,14 @@ class HostFacts {
         bmcIp = bm.BMC_IP ?: null
         watchdog = bm.WATCHDOG ?: null
         ipmiToolPresent = bm.containsKey('IPMITOOL') ? (bm.IPMITOOL as boolean) : null
+        bmcSelftest = bm.BMC_SELFTEST?.trim() ?: null
+        selUsedPct = bm.SEL_USED?.trim()?.isInteger() ? bm.SEL_USED.trim() as Integer : null
+        selOverflow = bm.SEL_OVERFLOW?.trim() ? bm.SEL_OVERFLOW.trim() == 'true' : null
+        List<List<String>> chassis = rows('bmc', 'CHASSIS').findAll { it.size() == 2 }
+        chassisRead = !chassis.isEmpty()
+        chassisFaults = chassis.findAll { it[1].trim() == 'true' }.collect { it[0].trim() }
+        sensorsRead = bm.SDR_READ == '1'
+        sensorFaults = rows('bmc', 'SDR_BAD').findAll { it.size() >= 3 }.collect { [name: it[0].trim(), status: it[1].trim(), reading: it[2].trim()] }
         parseQdevice()
         rows('vm_cpu', 'VM_CPU').each {
             if (it.size() >= 2) { vmCpus[it[0]] = it[1] }

@@ -215,6 +215,14 @@ makes a silent VLAN inconclusive rather than failed. A bond on no bridge is left
 **Not checked is not the same as not applicable, or fine.** A check that applies but cannot be answered, usually for want of a tool on the host, gets its own status.
 It raises no alarm and readiness lists it, because "Hardware: NA" read as if the hosts had no hardware to check.
 
+**Installing ipmitool is the one fix that adds software, so it is never automatic.** It installs new packages only: apt's own simulation is read first, and an install that would also upgrade or remove a package is refused, so it cannot carry a hypervisor's libraries forward by the way. needrestart is held off, because after any apt run it restarts every service still on an old library, whoever updated it, and on a cluster member that can be corosync, dlm or libvirt with GFS2 mounted. It ran after the first live install, before this was added. Morpheus-built 1.3 hosts lack ipmitool; 2.0 hosts ship it from HPE's repository and their agent polls the controller with it every minute.
+
+**A controller reset is refused during a freeze.** It restarts the iDRAC or iLO only, and the host carries on, but while a lockspace waits on fencing the controller may be what proves a failed host is off. It does not wait for the controller to come back, because an operation holds its cluster, and a fence acknowledgement or a freeze check queued behind a ten-minute wait is the outage this plugin exists to shorten.
+
+**One answer from the controller gates every other ipmitool read in the probe.** A wedged controller, the very case HW-08 is for, held each read to its limit and spent the full probe's whole budget, so the host's later sections came back cut.
+
+**A controller that is not there reads as not checked, never as healthy.** On a virtual machine ipmitool installs and finds nothing. The panel then shows no status at all rather than empty sections, and HW-08 says no controller answered.
+
 **Tenancy is by ownership.** See [docs/PERMISSIONS.md](docs/PERMISSIONS.md).
 
 **The reference is held to the code by reading its source.** Many ids only exist in a branch no test reaches, so `CheckCatalogSpec` parses `HealthChecker` and `HealthMonitor` for them, in both directions. It is prose written from the code, so a test can say an entry exists and names its standards key, and not that it is right: changing a check's meaning means changing its entry. A person reads it at 3am, so what was measured, or not, is said in the entry.

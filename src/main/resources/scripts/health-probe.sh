@@ -396,14 +396,28 @@ if [ "$MODE" = full ]; then
     for dev in $GFS2_DEVS; do echo "JOURNALS=$dev|$(bounded 15 journal_count "$dev")"; done
   fi
   sec bmc
-  # empty answers from ipmitool below mean nothing when it is not installed, as on a Morpheus-built 1.3 host
+  # empty answers from ipmitool below mean nothing when it is not installed, as on a Morpheus-built 1.3 host (2.0 ships it). The controller
+  # answers once first: a wedged one would hold every read below to its limit, and the whole probe's budget with them.
   echo "IPMITOOL=$(command -v ipmitool)"
-  echo "BMC_IP=$(t 15 ipmitool lan print | awk -F': *' '/^IP Address +:/{print $2}')"
+  MC=""; command -v ipmitool >/dev/null && MC="$(t 10 ipmitool mc info)"
+  ipmi() { [ -n "$MC" ] && t "$@"; }
+  echo "BMC_IP=$(ipmi 15 ipmitool lan print | awk -F': *' '/^IP Address +:/{print $2}')"
   echo "WATCHDOG=$(ls /dev/watchdog* 2>/dev/null | head -1)"
+  if [ -n "$MC" ]; then
+    echo "BMC_SELFTEST=$(t 10 ipmitool mc selftest | sed -n 's/^Selftest: *//p')"
+    t 10 ipmitool chassis status | awk -F' *: *' '/^(Power Overload|Main Power Fault|Power Control Fault|Drive Fault|Cooling\/Fan Fault) *:/{print "CHASSIS=" $1 "|" $2}'
+    t 10 ipmitool sel info | awk -F' *: *' '/^Percent Used/{sub(/%.*/, "", $2); print "SEL_USED=" $2} /^Overflow/{print "SEL_OVERFLOW=" $2}'
+    # every sensor not ok, whatever its type, and a discrete one whose reading names a failure, as its status column still says ok.
+    # SDR_READ says the list was read to its end: nothing listed from a list cut short is not nothing failing.
+    if o="$(t 20 ipmitool sdr elist)"; then
+      echo 'SDR_READ=1'
+      awk -F' *[|] *' 'NF >= 5 && $3 != "ns" && ($3 != "ok" || tolower($5) ~ /fail|fault|error|ierr|critical|predictive|non-recoverable/) {print "SDR_BAD=" $1 "|" $3 "|" $5}' <<<"$o" | head -20
+    fi
+  fi
   sec hardware
   echo "HW_PRODUCT=$(t 5 dmidecode -s system-product-name)"
   echo "HW_BIOS=$(t 5 dmidecode -s bios-version)"
-  echo "HW_BMC=$(t 10 ipmitool mc info | awk -F': *' '/^Firmware Revision/{print $2}')"
+  echo "HW_BMC=$(awk -F': *' '/^Firmware Revision/{print $2}' <<<"$MC")"
   for b in /proc/net/bonding/*; do
     [ -r "$b" ] || continue
     for s in $(awk '/^Slave Interface:/{print $3}' "$b"); do
@@ -411,8 +425,9 @@ if [ "$MODE" = full ]; then
     done
   done
   for m in /sys/devices/system/edac/mc/mc*; do [ -d "$m" ] && echo "EDAC=$(basename "$m")|$(cat "$m/ce_count")|$(cat "$m/ue_count")"; done
-  for ty in 'Power Supply' Temperature; do t 15 ipmitool sdr type "$ty" | awk -F' *\\| *' -v ty="$ty" '{print "SDR="ty"|"$1"|"$3"|"$5}'; done
-  t 15 ipmitool sel elist | tail -40 | sed 's/^/SEL=/'
+  for ty in 'Power Supply' Temperature; do ipmi 15 ipmitool sdr type "$ty" | awk -F' *\\| *' -v ty="$ty" '{print "SDR="ty"|"$1"|"$3"|"$5}'; done
+  # "last" reads only those: a full log read whole can be cut at the limit partway, leaving entries from its middle
+  ipmi 15 ipmitool sel elist last 40 | sed 's/^/SEL=/'
   sec certs
   # public certificates only, by exact name: never the private directories beside them. "date -d ''" means today, so an unread date stays empty
   echo "OPENSSL=$(command -v openssl)"

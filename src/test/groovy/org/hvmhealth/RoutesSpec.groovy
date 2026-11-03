@@ -179,7 +179,7 @@ class RoutesSpec extends Specification {
         Jobs.forCluster(27L).every { it.state != 'running' }
 
         where:
-        [route, verb] << [['status', 'catalog', 'check', 'raw', 'fix', 'timeSource', 'preflight', 'fleet', 'monitor', 'fleetInsights', 'availability', 'availabilityExport', 'report', 'vlanTest', 'windowStart', 'windowEnd', 'removeHost', 'fencePlan', 'fenceAck'], ['GET', 'POST']].combinations()
+        [route, verb] << [['status', 'catalog', 'check', 'raw', 'fix', 'timeSource', 'preflight', 'fleet', 'monitor', 'fleetInsights', 'availability', 'availabilityExport', 'report', 'vlanTest', 'windowStart', 'windowEnd', 'removeHost', 'fencePlan', 'fenceAck', 'controller', 'controllerReset'], ['GET', 'POST']].combinations()
     }
 
     def 'an operator gets the catalog, which says nothing about the cluster and changes nothing'() {
@@ -243,7 +243,7 @@ class RoutesSpec extends Specification {
         !cluster.getConfigProperty(HealthContext.CFG_TIME_SOURCES)
 
         where:
-        route << ['fix', 'timeSource', 'vlanTest', 'removeHost', 'fenceAck', 'windowStart', 'windowEnd']
+        route << ['fix', 'timeSource', 'vlanTest', 'removeHost', 'fenceAck', 'windowStart', 'windowEnd', 'controllerReset']
     }
 
     def 'a request Morpheus does not describe is refused too'() {
@@ -265,6 +265,74 @@ class RoutesSpec extends Specification {
 
         and:
         finished(c.fix(view(ACME, 'POST', [host: 'hvm-node02', key: 'service-enable']))).kind == 'fix: service-enable'
+    }
+
+    // ------------------------------------------------------------------ the management controller
+
+    def 'an operator with read access reads a host controller: one read-only script, parsed, and nothing audited'() {
+        given:
+        onScript = { String s -> new TaskResult(success: true, exitCode: '0', output: ControllerSpec.READ) }
+        Closure access = { String method -> new HealthController(null, null).routes.find { it.method == method }.permissions.collect { [it.code, it.availableAccessTypes] } }
+
+        when:
+        def r = controller().controller(view(ACME, 'GET', [host: 'hvm-node01']))
+        Map b = r.data.data as Map
+
+        then:
+        r.status == 200
+        b.host == 'hvm-node01'
+        b.controller.firmware == '7.00'
+        b.chassis.faults == ['Drive Fault']
+        ran.size() == 1
+        ran[0].contains('ipmitool sdr elist')
+        !ran[0].contains('mc reset')
+        audited == []
+        access('controller') == access('status')
+        access('controllerReset') == access('fix')
+    }
+
+    def 'a controller reset needs the host name typed, and changes nothing without it'() {
+        when:
+        def r = controller().controllerReset(view(ACME, 'POST', [host: 'hvm-node01', confirm: 'hvm-node02']))
+
+        then:
+        r.status == 400
+        r.data.msg.contains('Type the host name')
+        ran == []
+        audited == []
+    }
+
+    def 'a controller reset is refused during a freeze, before anything is sent'() {
+        given:
+        sample = Fixture.text('probe-frozen')
+
+        when:
+        Jobs.Job j = finished(controller().controllerReset(view(ACME, 'POST', [host: 'hvm-node01', confirm: 'hvm-node01'])))
+
+        then:
+        j.state == 'failed'
+        j.error.contains('none is reset during a freeze')
+        !ran.any { it.contains('mc reset') }
+        audited.any { it.contains('controller reset refused') }
+    }
+
+    def 'a controller reset sends the reset once and lets go of the cluster, so an acknowledgement never waits behind it'() {
+        given:
+        onScript = { String s ->
+            s.contains('mc reset cold') ? new TaskResult(success: true, exitCode: '0', output: 'Sent cold reset command to MC') : new TaskResult(success: true, exitCode: '0', output: sample)
+        }
+
+        when:
+        Jobs.Job j = finished(controller().controllerReset(view(ACME, 'POST', [host: 'hvm-node01', confirm: 'HVM-NODE01'])))
+
+        then:
+        j.state == 'done'
+        j.result.host == 'hvm-node01'
+        j.progress.any { it.contains('reset sent') }
+        ran.count { it.contains('mc reset cold') } == 1
+        !Jobs.busy(27L)
+        audited.any { it.contains('controller reset started') }
+        audited.any { it.contains('controller reset sent') }
     }
 
     // ------------------------------------------------------------------ answering before the proxy gives up

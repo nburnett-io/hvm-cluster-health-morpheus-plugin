@@ -86,7 +86,12 @@ These decide defaults owned by checks outside this release note, and are listed 
   person's decision; the wording should match HPE's.
 - **Does a hand-edited host setting survive the agent, and does it affect support?** Several checks read settings an
   operator may have set by hand (iSCSI startup, timers, time sources); whether the agent reverts them, and whether editing
-  them affects support, changes whether a drift is worth flagging.
+  them affects support, changes whether a drift is worth flagging. Partly answered 2026-11-01 on a 2.0 host: `hvmcli storage
+  multipath apply` rewrites `/etc/multipath.conf` wholesale (a hand edit there is lost, and its `configure-default` template
+  sets `user_friendly_names yes`, which renamed the live map to `mpatha` until reverted), while `/etc/multipath/conf.d/*.conf`
+  survives `apply` and its device values take precedence over the main file on multipath-tools 0.14.3, so a hand-set
+  multipath value belongs in `conf.d`. Still open: whether the agent re-runs `apply` by itself (upgrade, re-add, reboot),
+  whether iSCSI `node.startup` and time sources are treated the same way, and whether a `conf.d` override affects support.
 - **The supported minimum hosts for a single-site cluster, and the support stance on running at two with a witness.** This
   sets the host-count floor.
 
