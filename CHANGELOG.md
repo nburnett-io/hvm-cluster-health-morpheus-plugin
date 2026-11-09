@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.0
+
+**A signed read, for a dashboard**
+- **`/v1/clusters` on the status URL port**, for a tool that signs each request with an Ed25519 key: every monitored cluster by id, with its state, whether a change window holds its paging, when it was last checked and how, its overall health, counts by status, readiness by area, and its check ids by status with their catalog names. Never a host, cluster name, tenant, VM or finding text. Anything unsigned or not signed right gets 404 `HVM-HEALTH UNKNOWN`, as a path that does not exist does. A node standing by gives each cluster's word only. The answer is plain HTTP, and a copied request can be replayed for 5 minutes. See [docs/ALERTING.md](docs/ALERTING.md).
+- **Reader keys**, a new setting: the public keys of the tools that may read it, one a line, a label allowed before each. Up to 20 are used. The plugin keeps no secret.
+- The all-clusters page says how many reader keys are in force, and the last read refused and why. It also says when lines are not a key, and when keys are set but the Status URL port is off. The log gives why a read was refused, at most once a minute.
+
+**A link that opens the tab**
+- **A link ending in `#hvm-cluster-health-clusterTab` opens the Cluster Health tab**, once a page, by clicking the tab's own link, as a person would. A user who cannot see the tab gets nothing.
+
+**Fixed**
+- **The status URL port no longer leaves requests open (since 0.5.0).** A request that waited too long for one of its two threads was never answered or closed, so it held a connection in the appliance's JVM: two stalled clients were enough to make every later request do so. A request now has its 5 s from when a thread takes it, up to 32 wait, and past that a connection is closed at once.
+
+Tested live on a test appliance (Morpheus 9.1.0.1, a three-host HVM 2.0 cluster): an unsigned read of `/v1/clusters` gets 404; with a reader's key in Reader keys, the reader got each cluster's counts, check ids by status, readiness and last check within a minute, matching the tab; with the key taken out, its reads were refused again; adding and removing the key in the settings dialog kept the other settings. The tab link opens the Cluster Health tab for a user signed in to Morpheus who can see the cluster. When Morpheus asks the user to sign in first, the link's tab part is lost through the sign-in and the cluster opens on its Summary tab.
+
 ## 0.5.0
 
 **Management controller (iDRAC, iLO) through ipmitool**

@@ -6,6 +6,7 @@ import com.morpheusdata.core.data.DataQuery
 import com.morpheusdata.model.Account
 import com.morpheusdata.model.ComputeServerGroup
 import com.morpheusdata.model.OperationNotification
+import groovy.json.JsonOutput
 import groovy.util.logging.Slf4j
 import org.hvmhealth.ClusterHealthPlugin
 import org.hvmhealth.checks.HealthChecker
@@ -13,6 +14,7 @@ import org.hvmhealth.fixes.Fixes
 import org.hvmhealth.model.HostFacts
 import org.hvmhealth.standards.Layout
 
+import java.security.PublicKey
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.PriorityBlockingQueue
@@ -93,6 +95,12 @@ class HealthMonitor {
     private static volatile List statusMemo
     /** Another appliance node holds the lease, so this one reads no host by itself and raises no alarm, and its status URL answers from that node's row. A person's check here still runs. */
     private static volatile boolean standby = false
+    /** Who may read /v1/clusters (see ReaderKeys), from the Reader keys setting on every sweep, and how many of its lines are not a key. */
+    private static volatile List<PublicKey> readerKeys = []
+    private static volatile int readerKeysBad
+    /** The last read of /v1/clusters refused, [at, why], for the all-clusters page; and when a refusal was last logged, as anyone can ask. */
+    private static volatile Map lastRefusal
+    private static volatile long refusalLoggedAt
 
     /** Waits in the checkers' queue: what the freeze watch asks for goes first, and otherwise in the order they came. */
     static class CheckTask implements Runnable, Comparable<CheckTask> {
@@ -179,8 +187,12 @@ class HealthMonitor {
         s.isInteger() && (s as Integer) in 1..65535 ? s as Integer : -1
     }
 
+    /** At load and on every sweep, before the lease, so a node standing by keeps its reader keys current too. */
     private static void syncStatusServer(Map settings) {
-        StatusServer.ensure(statusPort(settings)) { String path -> statusAnswer(path) }
+        Map keys = ReaderKeys.parse(settings?.readerKeys as String)
+        readerKeys = keys.keys as List<PublicKey>
+        readerKeysBad = keys.bad as int
+        StatusServer.ensure(statusPort(settings), { String path -> statusAnswer(path) }, { String t, String sig -> readerAnswer(t, sig) })
     }
 
     private static Map statusState() {
@@ -205,12 +217,31 @@ class HealthMonitor {
         fresh
     }
 
+    /**
+     * A GET of /v1/clusters: what DetailAnswer gives when one of the reader keys signed it, from the row on a node standing by as statusAnswer chooses, and otherwise
+     * what a path that does not exist gets. A refusal is kept for the all-clusters page, and logged at most once a minute.
+     */
+    static List readerAnswer(String time, String signature, long now = System.currentTimeMillis()) {
+        String why = ReaderKeys.refusal(readerKeys, 'GET', ReaderKeys.PATH, time, signature, now)
+        if (why) {
+            lastRefusal = [at: now, why: why]
+            if (now - refusalLoggedAt >= 60_000L) {
+                refusalLoggedAt = now
+                log.warn("cluster health status URL refused a read of ${ReaderKeys.PATH}: ${why}")
+            }
+            return [404, StatusAnswer.UNKNOWN]
+        }
+        Map body = standby ? DetailAnswer.fromRow(Lease.row, now) : DetailAnswer.answer(statusState(), now)
+        [200, JsonOutput.toJson(body), 'application/json; charset=utf-8']
+    }
+
     /** For the all-clusters page: how the monitor itself is doing, which on a node standing by is what the holder last wrote. Numbers only, and who holds the lease. */
     static Map monitorState(long now = System.currentTimeMillis()) {
         Map held = (Lease.row?.summary as Map)?.monitor as Map
         Map ours = standby ? [pace: held?.pace ?: [:], checkers: held?.checkers, watch: held?.watch ?: [on: false], lastSweepAt: Lease.row?.at]
                 : [pace: pace, checkers: checkers?.maximumPoolSize, watch: FreezeWatch.summary(now), lastSweepAt: lastSweepAt]
-        ours + [statusPort: StatusServer.listening(), statusError: StatusServer.error, lease: [node: Lease.node, holder: Lease.row?.node, standingBy: standby]]
+        ours + [statusPort: StatusServer.listening(), statusError: StatusServer.error, readerKeys: readerKeys.size(), readerKeysBad: readerKeysBad, lastRefusal: lastRefusal,
+                lease: [node: Lease.node, holder: Lease.row?.node, standingBy: standby]]
     }
 
     /** Whether this node is standing by, for the pages: what it shows is stored, not checked here. */

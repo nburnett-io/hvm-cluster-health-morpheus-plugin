@@ -7,7 +7,6 @@
 - That `dlm_tool ls` exits non-zero when `dlm_controld` is not running, which the watch reads as no answer. From the source, not seen. If it exits 0 and prints nothing, that reads as clear, on a host with nothing DLM can say.
 - How long a lockspace stays stopped in a normal mount or leave, against the 15 s the watch waits. Long enough a stop reads as a freeze for as long as it lasts, which the quick check would also say.
 - The status URL with N-central's HTTP service, and a real firewall. A workstation reached a test server on the appliance; these answers and states have not been read by a real N-able.
-- The status URL's request-read deadline. The handler is bounded by a 5 s reaper, but the single JDK dispatcher thread that parses the request line and headers has no deadline (`sun.net.httpserver.maxReqTime` is unset), so many slow half-open clients could in principle stall the accept/parse path and suppress the answer. Serve the port on a management network; consider setting `sun.net.httpserver.maxReqTime`/`maxRspTime` at startup. Hardening, not a proven wedge.
 - `@@busiest` (BUSY_A/BUSY_B) and `@@vm_cpu` print the libvirt domain name without the probe's `san()`, unlike `@@sec` and `@@vm_ports`. A name containing `|` would shift the fields, so that one VM's row is dropped by the parser's size check (no leak, no crash; these feed operator-only busiest and migration data, never a report). Sanitise the name in those two sections.
 - Two kernel-version comparators (`kernelParts`/`kernelCompare` for SEC-02 and `kernelRank`/`kernelAtLeast` for KRN-04) do nearly the same work and must be kept in step. Merge to one (the optional-ABI form). Both currently fail safe to NOT CHECKED, so this is tidiness, not a bug.
 - Morpheus's Web Check on `127.0.0.1:<port>` with these exact words, and whether a 503 with a matching body behaves as a text mismatch does. A 200 mismatch was seen to open an incident; a 503 was not tried.
@@ -100,6 +99,7 @@
 - SEC-03's and SEC-10-style wording depends on the kernel: the exact `vulnerabilities/*` strings and SMT values vary by version, so "Vulnerable" matching is a substring. Confirm against 6.8 and 7.0 output.
 - HPE's 4 GB per-host memory reserve (and the 70% cluster / 85% host levels) is not yet applied in CAP-01, which still compares raw host memory and so overstates survivor capacity by about 4 GB a host. Applying it reworks `memoryHeadroom`, which MIG-04 and the pre-flight also use, so it is deferred rather than destabilize the N+1 math late in 0.4.0.
 - That a tenant can, or cannot, set a libvirt domain name with a `|`, a newline or control characters: Morpheus may sanitize it, and no document says so. The probe and parser are hardened either way; this decides whether the hardening is load-bearing or belt-and-suspenders.
+- The signed read of `/v1/clusters` across a plugin reload, and from a node standing by.
 
 ## Next
 
@@ -123,7 +123,14 @@
 - A node standing by answers the status URL from the row, so it is up to about 2 minutes behind: a minute between the holder's writes, and a minute between this node's reads. With no fresh row for 5 minutes it reads STALE.
 - The tab on a node standing by has only the last stored summary until someone presses Check: overall health and its time, up to 15 minutes old, and no findings. The Standards, Time and other sections wait for a check too. A check pressed there shows only on that node, raises no alarm, and is forgotten when that node takes over. The holder's next check raises what it found.
 - The all-clusters page on a node standing by shows stored summaries, up to 15 minutes old, and no shared causes, as only the holder has them: FLT-01's alarm still shows them.
-- Reading the status port from a stranger costs a little CPU: `/status` is kept for 5 s, and two threads answer. A request has 5 s to finish. It cannot reach a host or the database, as long as `Paging.held` stays in memory.
+- Reading the status port from a stranger costs a little CPU: `/status` is kept for 5 s, and two threads answer. A request has 5 s from when a thread takes it, reading its request line included, as the JDK reads that on the same thread. It cannot reach a host or the database, as long as `Paging.held` stays in memory.
+- Up to 32 requests wait for a thread, and past that the JDK closes a connection unanswered. So clients that stall their requests, coming steadily, keep others out for as long as they come, though none holds a thread past 5 s or leaves a connection open. A connection that sends nothing reaches no thread, and the JDK closes it 30 to 40 s later; it caps neither those nor the number of connections. Its own limits (`sun.net.httpserver.*`) are system properties for the whole JVM, Morpheus's included, so the plugin does not set them. Serve the port on a management network.
+- A tab link that goes through Morpheus sign-in loses its `#`, so the cluster opens on Summary.
+- A copied signed read can be replayed for 5 minutes, against any appliance that holds the same key. It only reads. Give each appliance its own key.
+- The signed read's answer is plain HTTP, neither encrypted nor signed: serve the port on a management network and allow only the reader's address.
+- A node standing by gives a signed read each cluster's word only, as it holds no checks.
+- A signed read in form and in time, but not signed by a reader key, is checked against every key, up to 20. So its 404 can come a little later than a missing path's, and it costs a little more CPU.
+- A key past the twentieth is counted on the all-clusters page with the lines that are not a public key.
 
 - Below a window about 800 px wide the columns of the wider tables get narrow, as they wrap rather than scroll. At 600 px the Findings table is still about 3 px over and scrolls that much, and it is hard to read.
 - The dark theme has not been checked on a real dark setup, only on a stub page with a dark background. Status colours are mid-tones that read at about 4:1 on light or dark, as nothing here can tell which the theme is.

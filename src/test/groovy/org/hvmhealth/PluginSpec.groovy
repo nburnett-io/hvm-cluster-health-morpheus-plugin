@@ -85,6 +85,27 @@ class PluginSpec extends Specification {
         [s.statusPort, s.checkConcurrency, s.freezeWatchSeconds, s.maxWatchPerMinute]*.inputType.every { it == OptionType.InputType.TEXT }
     }
 
+    def 'the reader keys setting is a text area, empty on a new install, with help'() {
+        given:
+        Plugin plugin = new ClusterHealthPlugin()
+        Plugin.getDeclaredMethod('setMorpheus', MorpheusContext).with { accessible = true; invoke(plugin, Mock(MorpheusContext)) }
+
+        when:
+        plugin.initialize()
+        Map<String, OptionType> s = plugin.settings.collectEntries { [(it.fieldName): it] }
+
+        then:
+        s.readerKeys.code == 'hvm-health.readerKeys'
+        s.readerKeys.fieldLabel == 'Reader keys'
+        s.readerKeys.inputType == OptionType.InputType.TEXTAREA
+        !s.readerKeys.defaultValue
+        s.readerKeys.helpText.contains('/v1/clusters')
+        s.readerKeys.helpText.contains('Status URL port')
+        // just under the port it needs
+        s.readerKeys.displayOrder > s.statusPort.displayOrder
+        s.readerKeys.displayOrder < s.checkConcurrency.displayOrder
+    }
+
     def 'the probe says whether dlm_tool answered, in the section the freeze watch and the checks read'() {
         given:
         String probe = HealthContext.getResourceAsStream('/scripts/health-probe.sh').getText('UTF-8')
@@ -431,6 +452,24 @@ class PluginSpec extends Specification {
         mine.findAll(/'class': '([^']*)'/) { m, c -> c }.every { c -> c.tokenize().every { it.startsWith('hh-') || it.startsWith('st-') } }
         ['data-section="window"', 'data-section="busiest"'].every { hbs.contains(it) }
         ['hh-incident', 'hh-member', 'hh-window'].every { hbs.contains(".hvm-health .${it}") }
+    }
+
+    def "a link ending in the tab's code opens the tab once, by clicking its own link"() {
+        given:
+        String tab = new File('src/assets/javascripts/health-tab.js').getText('UTF-8')
+        String opener = tab.substring(tab.indexOf('function openFromLink'), tab.indexOf('function scan'))
+        String scan = tab.readLines().find { it.contains('function scan') }
+
+        expect:
+        tab.contains("var TAB = '${HealthTabProvider.CODE}';")
+        opener.contains("window.location.hash !== '#' + TAB")
+        opener.contains('''document.querySelector('a[href$="#' + TAB + '"]')''')
+        // once a page: the mark goes on before the click, as the click changes the page and the page change scans again
+        opener.contains('if (ns.openedFromLink ||')
+        opener.contains('ns.openedFromLink = true')
+        opener.contains('link.click()')
+        opener.indexOf('ns.openedFromLink = true') < opener.indexOf('link.click()')
+        scan.contains('openFromLink()')
     }
 
     def 'the longest change window is a setting, with a default and help'() {

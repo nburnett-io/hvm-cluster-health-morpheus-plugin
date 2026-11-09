@@ -13,9 +13,9 @@ finding -> status URL -> Web Check -> incident -> alert rule -> your contacts
 
 Turn it on with the **Status URL port** plugin setting, a port above 1024. It starts within a minute, and moves within a minute of a change. If the port cannot be used, the plugin carries on, logs why, tries again each minute, and says why at the top of the all-clusters page.
 
-It is plain HTTP with no login, because a URL monitor cannot use a browser session, which every other route in the plugin needs. It carries no secret and needs no certificate. GET and HEAD only, always `text/plain`. Each request is answered from what the monitor already holds, and never reaches a host or the database.
+It is plain HTTP with no login, because a URL monitor cannot use a browser session, which every other route in the plugin needs. It carries no secret and needs no certificate. GET and HEAD only, always `text/plain` but for the signed read below. Each request is answered from what the monitor already holds, and never reaches a host or the database.
 
-A body holds only the words and counts below: no host, cluster, tenant, VM or finding. There is no route listing clusters. Ids are not secret, and an id tells a stranger nothing but whether that cluster is healthy.
+A body holds only the words and counts below: no host, cluster, tenant, VM or finding. Without a reader key there is no route listing clusters. Ids are not secret, and an id tells a stranger nothing but whether that cluster is healthy.
 
 | Path | Normal | Problem |
 |---|---|---|
@@ -30,6 +30,36 @@ The counts line reads `clusters=12 critical=0 warning=3 stale=0 held=1 reloading
 - **Held** counts clusters in a change window. A window holds a cluster's warnings at OK, and never a freeze, a withdrawn filesystem, lost quorum or a tenant isolation failure.
 - **Reloading** counts clusters not yet checked since the plugin loaded, for the first 15 minutes after it loads. See below.
 - **Any appliance node can answer.** One node runs the checks, and the others answer from what it last stored, up to about 2 minutes behind. So a monitor on any node's address sees the same words, though a freeze reaches the node running the checks first. With no fresh record for 5 minutes a node reads STALE. If the node running the checks stops, another takes over within about 4 minutes, and clusters read as after a reload, below. A monitor on the stopped node's own address sees its connection fail, so give it another node's too, or read through a load balancer.
+
+## A signed read, for a dashboard
+
+- A tool that wants more than words puts its public key in the **Reader keys** setting and keeps the private half. The plugin holds no secret.
+- A key is Ed25519: the standard base64 of its X.509 SubjectPublicKeyInfo, 60 characters starting `MCowBQYDK2VwAyEA`. One a line; a line may start with a label, and the key is its last word.
+- Up to 20 keys are used. A line that is not a key, and any key past 20, is ignored, and the all-clusters page counts them.
+- The request is `GET /v1/clusters` on the status URL port, with two headers: `X-HH-Time`, the time in Unix seconds, and `X-HH-Signature`, the standard base64 of the 64-byte signature.
+- The signed bytes are `hvm-health-v1`, `GET`, `/v1/clusters` and the time, a line each, joined by line feeds, with nothing after the time.
+- The time must be within 5 minutes of the appliance node's clock, either way. Every answer has a `Date` header, so a tool can see a difference.
+- The answer is JSON, version 1: each monitored cluster by id, with its state (`OK`, `WARNING`, `CRITICAL`, `STALE` or `RELOADING`, judged as `/cluster/<id>` judges it), whether a change window holds its paging, when it was last checked and how, the last full check, its overall health, counts by status, readiness by area, and its check ids by status. `names` gives each listed check's name from the check catalog.
+- `alive` is true when `/alive` would answer 200, `sweptAt` is when the last sweep ran, and `quickMinutes` is the quick check interval.
+- Readiness is `PASS`, `WARN`, `FAIL`, `NOT_CHECKED` or `NA`, where nothing in the area applies. Counts and check ids leave out what does not apply.
+- It never holds a host, cluster name, tenant, VM or finding text.
+- Anything unsigned, or not signed right, gets 404 `HVM-HEALTH UNKNOWN`, like a path that does not exist. A HEAD gets the same.
+- The all-clusters page shows how many keys are in force, and the last read refused with why. The log says why too, at most once a minute.
+- A node standing by gives each cluster's word only, from the record of the node that runs the checks.
+- The answer is plain HTTP, neither encrypted nor signed: keep the port on a management network and allow only the reader's address.
+- A copied request can be replayed for 5 minutes, against any appliance that holds the same key. It only reads. Give each appliance its own key.
+
+```json
+{"version": 1, "standingBy": false, "alive": true, "sweptAt": 1800000000000, "quickMinutes": 5,
+ "clusters": [{"id": 27, "state": "WARNING", "held": false,
+               "checkedAt": 1799999700000, "mode": "quick", "fullAt": 1799982000000, "overall": "WARNING",
+               "counts": {"fail": 0, "warn": 2, "pass": 41, "notChecked": 3},
+               "readiness": [{"area": "Live migration", "status": "WARN"}],
+               "checks": {"FAIL": [], "WARN": ["TIM-02"], "NOT_CHECKED": ["HW-08"], "PASS": ["CLU-01"]}}],
+ "names": {"CLU-01": "Enough hosts for quorum", "HW-08": "Management controller healthy", "TIM-02": "Host clocks agree"}}
+```
+
+Times are epoch milliseconds, or null. Counts are result rows, so a check on three hosts counts three times, and is listed once. Before the first sweep no cluster is listed. A cluster with no check yet has only its id, state and `held`. On a node standing by, each cluster is its id and state only, `quickMinutes` is null and `names` is empty.
 
 ## After a plugin reload, an upgrade or a takeover
 

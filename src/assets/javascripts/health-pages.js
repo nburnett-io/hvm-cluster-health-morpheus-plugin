@@ -187,7 +187,13 @@
         'Checks: ' + p.clusters + ' clusters, ' + m.checkers + ' at once. Oldest check ' + min(p.roundMs) + ' ago, most overdue ' + min(p.mostOverdueMs) + ', ' + p.waiting + ' waiting.' }),
       el('div', { 'class': 'hh-muted', text: !w.on ? 'Freeze watch: off.' : 'Freeze watch: about every ' + w.realSeconds + ' s (set to ' + w.seconds + ' s), ' + w.clusters + ' clusters within ' + w.budget + ' reads a minute.' + (w.oldestReadSec != null ? ' Oldest read ' + w.oldestReadSec + ' s ago.' : '') }),
       m.statusError ? el('div', { 'class': 'hh-err', text: 'Status URL: ' + m.statusError }) :
-        el('div', { 'class': 'hh-muted', text: m.statusPort ? 'Status URL: listening on port ' + m.statusPort + '.' : 'Status URL: off.' })
+        el('div', { 'class': 'hh-muted', text: m.statusPort ? 'Status URL: listening on port ' + m.statusPort + '.' : 'Status URL: off.' }),
+      // who may read /v1/clusters, from the Reader keys setting: nothing when it is empty
+      !(m.readerKeys || m.readerKeysBad) ? null : el('div', {}, [
+        m.readerKeysBad ? el('div', { 'class': 'hh-err', text: 'Reader keys: ' + m.readerKeysBad + ' line(s) are not a public key, or are past the 20th, so they are ignored.' }) : null,
+        !m.readerKeys ? null : !m.statusPort ? el('div', { 'class': 'hh-err', text: 'Reader keys are set, but the Status URL port is off, so no reader can use them.' }) :
+          el('div', { 'class': 'hh-muted', text: 'Reader keys: ' + m.readerKeys + ' in force.' + (m.lastRefusal ? ' Last refused read, ' + ui.ago(m.lastRefusal.at) + ': ' + m.lastRefusal.why + '.' : '') })
+      ])
     ]);
   }
 

@@ -9,6 +9,7 @@
   window.Morpheus.pluginTabs = window.Morpheus.pluginTabs || {};
   var ns = window.Morpheus.pluginTabs.hvmClusterHealth = window.Morpheus.pluginTabs.hvmClusterHealth || {};
   var BASE = '/plugin/hvm-health/';
+  var TAB = 'hvm-cluster-health-clusterTab';
 
   function csrf() {
     var m = document.querySelector('meta[name="_csrf"]') || document.querySelector('meta[name="csrf-token"]');
@@ -601,7 +602,16 @@
     load();
   }
 
-  function scan() { Array.prototype.forEach.call(document.querySelectorAll('.hvm-health'), init); }
+  /** A link that ends in #hvm-cluster-health-clusterTab, such as a dashboard's, opens this tab: once a page, by clicking the tab's own link, so Morpheus does what a person's click does. */
+  function openFromLink() {
+    if (ns.openedFromLink || window.location.hash !== '#' + TAB) return;
+    var link = document.querySelector('a[href$="#' + TAB + '"]');
+    if (!link) return;
+    ns.openedFromLink = true;
+    link.click();
+  }
+
+  function scan() { Array.prototype.forEach.call(document.querySelectorAll('.hvm-health'), init); openFromLink(); }
   ns.clusterTab = init;
   ns.unmount = function (root) { if (root) root.removeAttribute('data-health-init'); };
   scan();

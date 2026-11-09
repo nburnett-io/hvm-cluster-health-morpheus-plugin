@@ -492,6 +492,53 @@ class StatusSpec extends Specification {
         StatusServer.requestLimitMs = 5000L
     }
 
+    /** What a socket got: 'answered' (a byte came), 'closed' (end of stream or a reset) or 'hung' (neither, by the deadline). */
+    private static String outcome(Socket s, long deadline) {
+        try {
+            s.soTimeout = Math.max(1L, deadline - System.currentTimeMillis()) as int
+            s.inputStream.read() == -1 ? 'closed' : 'answered'
+        } catch (SocketTimeoutException ignored) {
+            'hung'
+        } catch (IOException ignored) {
+            'closed'
+        }
+    }
+
+    def 'with both threads held and the queue full, every request is answered or closed, and none is left open and unanswered'() {
+        given: 'each answer takes a while, so requests wait in the queue for longer than the limit'
+        StatusServer.requestLimitMs = 300L
+        int port = freePort()
+        StatusServer.start(port) { String p -> Thread.sleep(100); [200, "HVM-HEALTH OK\n"] }
+        List<Socket> stalled = (1..2).collect {
+            Socket s = new Socket('127.0.0.1', port)
+            s.outputStream.write('GET /sta'.bytes)
+            s.outputStream.flush()
+            s
+        }
+        Thread.sleep(100)   // both threads have them
+        List<Socket> rest = []
+
+        when: 'a third request, and enough more to fill the queue and go past it'
+        (1..StatusServer.QUEUE + 8).each {
+            Socket s = new Socket('127.0.0.1', port)
+            rest << s
+            s.outputStream.write('GET /alive HTTP/1.1\r\nHost: status.invalid\r\nConnection: close\r\n\r\n'.bytes)
+            s.outputStream.flush()
+        }
+        long deadline = System.currentTimeMillis() + 8000L
+        List<String> got = (stalled + rest).collect { outcome(it, deadline) }
+
+        then: 'the stalled two are cut off, all that waited are answered, the rest are closed at once, and the port still answers'
+        !got.contains('hung')
+        got[0..1] == ['closed', 'closed']
+        got.count('answered') >= StatusServer.QUEUE
+        fetch(port, '/alive')[0] == 200
+
+        cleanup:
+        (stalled + rest)*.close()
+        StatusServer.requestLimitMs = 5000L
+    }
+
     def 'stopping lets the port go, so a reloaded plugin can have it'() {
         given:
         int port = freePort()

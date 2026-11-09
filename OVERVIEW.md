@@ -33,7 +33,7 @@ Fixes               what may change, the guards, the fence plan
 HealthContext       one cluster through the plugin API
 HealthMonitor       automatic checks, alarm, automatic fixes
 FreezeWatch         a small read between checks, to find a freeze soon, within a budget of reads
-StatusServer        the status URL, off until a port is set; StatusAnswer decides what it says
+StatusServer        the status URL, off until a port is set; StatusAnswer decides what it says, DetailAnswer what a signed read gets, ReaderKeys who may read it
 Incidents           which findings are one incident, and what its alarm says
 Impact              which tenants' VMs a finding reaches; operators only
 ChangeWindows       planned work that holds paging, kept across reloads
@@ -55,9 +55,13 @@ Most important checks only exist across hosts, so the checker takes all hosts at
 
 **Findings reach the outside through a URL.** Plugin alarms do not reach Morpheus alert rules (12 open alarms, 0 incidents), and plugin API 1.5.0 cannot create a check or an incident. A Morpheus Web Check on a URL does open an incident, and N-central cannot log in to a plugin route, so one URL with no login serves both. It says only words and counts, because it has no login: a stranger learns whether a cluster id is healthy and nothing else.
 
+**A reader that wants more than words signs its request.** A dashboard cannot log in to a plugin route either. A token would cross a plain-HTTP port in clear, and the plugin would have to keep it. So the reader signs each request with an Ed25519 key, and the plugin holds only the public half. Anything unsigned answers as a path that does not exist. The answer holds ids, words, counts and times, and check names from the catalog. It never names a host, cluster, tenant or VM.
+
 **What cannot be read is never plain OK on the status URL, except that a reload says so.** A cluster out of date reads STALE, and /alive reads STALE with automatic checks off. A cluster not yet checked since a load reads STALE too, but for the first 15 minutes, when it answers `HVM-HEALTH OK` with a second line `reloading`, and counts under `reloading=N`. We first chose the alert, then reversed it: every reload would open a Web Check incident on every cluster, which trains people to ignore them. The grace needs the monitor to be doing its job: no sweep for 5 minutes, or checks off, ends it. A freeze the watch holds is CRITICAL through it, and the watch does not wait for the first round. `/alive` gets no more than it had.
 
 **The freeze watch reads a cluster whose check is only waiting.** It skipped any cluster with a check queued or running, and a running one will tell it what it reads. One still queued can be minutes away, as all are after a reload, and without this the grace would hide a freeze for as long as the queue. It costs reads inside the watch's budget.
+
+**The status port's limit runs from when a request starts, and its queue is bounded.** Two threads answer, and each request has 5 s from when a thread takes it; the JDK reads the request line on that thread, so a client that stalls partway is cut off there and its connection closed. 0.5.0 counted the 5 s from when a request was queued and cancelled it, and the JDK never answers or closes a request that never ran, so each one held a connection for good. Now up to 32 wait, and past that the JDK closes the connection at once. The JDK's own request limits are system properties for the whole JVM, which Morpheus shares, so the plugin does not set them.
 
 **A watch that has stopped is a monitor problem, so it uses PRB-04 and /alive rather than a line on a page.** Stuck agent calls can hold all its threads. When no read has been able to start for 2 minutes, /alive reads STALE and PRB-04's alarm says so in its own words. It is measured by reads refused rather than by the oldest read, as a cluster all in maintenance or always under check has an old read for good reasons.
 
