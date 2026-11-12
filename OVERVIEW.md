@@ -261,6 +261,10 @@ about to run. A person pressing Fix is not bound by it.
 
 **Quick checks keep the last full answer** for what they do not run, so alarms from full-only checks do not come and go.
 
+**A failed unit is judged by what depends on it** (HST-09). `systemctl --failed` answers from systemd's memory, so it costs nothing and runs on every check. A failed corosync, dlm, multipathd, iscsid, open-iscsi, libvirtd, virtqemud, chrony, timesyncd or morphd fails, as the host then runs without its membership, storage paths, VM daemon, clock or agent; everything else warns. smartmontools warns rather than fails because HW-07 reads the disks itself on every full check, so a dead smartd loses the continuous watch, not the only one. Real hosts carry noise (an AIDE check with no database on every host, `networkd-wait-online` on some), so `failedUnitsIgnore` follows `hvmcliIgnore`'s pattern, and starts empty: a unit that fails on every host still says how the hosts were built. A VM's scope unit carries the VM's name, so it is counted, never named, as reports carry HST observations.
+
+**Appliance backups are read from the backup record, never over REST** (MOR-07). The global Backups switch and its default bucket have no member in plugin API 1.5.0, and calling the REST API would need a stored login, so the check reads the `morpheusAppliance` backup, its results and its bucket through the plugin API. With backups off globally the job never runs, which reads as never succeeded, the same FAIL. A backup with no bucket goes to the bucket flagged as the default backup target, as `getBackupStorageBucket` says, and with none to the appliance's own disk. Results that cannot be read with no last result to fall back on are NOT CHECKED, never "never succeeded": a filter the appliance does not know must not raise a FAIL. One appliance, so every cluster reports it, like HST-03.
+
 ## What the tab's classes teach
 
 Morpheus's stylesheet and Bootstrap define `.banner`, `.row`, `.muted` and others globally, and a plugin tab inherits them.

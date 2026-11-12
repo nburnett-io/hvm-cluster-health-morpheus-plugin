@@ -122,6 +122,9 @@ class HostFacts {
     List<Map> vmCrashes = []                     // [vm (libvirt domain), at (epoch s, null when unread)]
     List<Map> rootFs = []                        // [target, pct, inodePct]; a percentage is null when it has none
     boolean rootFsCut
+    /** Whether systemctl --failed answered; null when the probe had no such section. The units it named, each a systemd unit name. */
+    Boolean failedUnitsRead
+    List<String> failedUnits = []
     /** Rates between two samples of every running VM: [vm, cpuPct (of the whole host), readIops, writeIops, readMBs, writeMBs]. Empty when the probe did not sample. */
     List<Map> vmActivity = []
     /** @@patch_exposure, @@kernel_posture, @@net_timing are full-check only. Each stays null or empty when the probe had no such section. */
@@ -540,6 +543,8 @@ class HostFacts {
         oomRead = h.OOM_READ == '1'
         vmLogsRead = h.VM_LOGS_READ == '1'
         rootFsCut = h.ROOT_DF_CUT == '1'
+        failedUnitsRead = h.FAILED_READ == '1'
+        failedUnits = rows('host_health', 'FAILED_UNIT').collect { it[0] }.findAll().unique()
         oomKills = rows('host_health', 'OOM').findAll { it.size() >= 2 }.collect { List<String> r ->
             String vm = scopeVm(r.size() > 2 ? r[2] : null)
             [at: isoSeconds(r[0]), comm: r[1], vm: vm, qemu: vm != null || r[1] ==~ /(?i).*(qemu|kvm).*/]

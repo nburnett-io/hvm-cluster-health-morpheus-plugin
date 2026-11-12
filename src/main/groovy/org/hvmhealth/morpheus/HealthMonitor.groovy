@@ -44,7 +44,7 @@ class HealthMonitor {
     static final Map<Long, Map> LAST = new ConcurrentHashMap<>()
     private static final Map<Long, List<HealthChecker.Result>> LAST_FULL = new ConcurrentHashMap<>()
     /** Findings only a full check produces (ring and packet tests, journal counts, management controllers). */
-    static final Set<String> FULL_ONLY = ['NET-03', 'NET-09', 'MIG-02', 'GFS-06', 'FEN-01', 'FEN-02', 'HB-02', 'HW-01', 'HW-02', 'HW-03', 'HW-04', 'HW-05', 'HW-06', 'HW-07', 'HW-08', 'HW-09', 'HST-02', 'HST-03', 'STO-07', 'STO-13', 'HPE-01',
+    static final Set<String> FULL_ONLY = ['NET-03', 'NET-09', 'MIG-02', 'GFS-06', 'FEN-01', 'FEN-02', 'HB-02', 'HW-01', 'HW-02', 'HW-03', 'HW-04', 'HW-05', 'HW-06', 'HW-07', 'HW-08', 'HW-09', 'HST-02', 'HST-03', 'MOR-07', 'STO-07', 'STO-13', 'HPE-01',
                                            'PKG-04', 'KRN-01', 'KRN-02', 'KRN-03', 'NET-17', 'NET-18', 'NET-19',
                                            'SEC-01', 'SEC-02', 'SEC-03', 'SEC-04', 'SEC-05', 'SEC-06', 'VM-07'] as Set
     private static final Map<String, Long> ATTEMPTS = new ConcurrentHashMap<>()

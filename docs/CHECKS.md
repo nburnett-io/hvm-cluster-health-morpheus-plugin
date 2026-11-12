@@ -406,6 +406,12 @@ What every check id means. The tab shows the same text: click an id, or press He
 - **Why it matters:** A host with a full disk stops logging, and the agent and libvirt can fail with it, leaving it unmanageable.
 - **What to do:** Clear space before it fills, starting with old logs and kernels. The plugin has no fix for this.
 
+### HST-09: No failed systemd units
+
+- **What it looks at:** Reads systemctl --failed, from systemd's memory, on every check. FAIL: a unit the host's part in the cluster depends on has failed: corosync or dlm (membership, GFS2 locking), multipathd, iscsid or open-iscsi (storage paths), libvirtd or virtqemud (VMs), chrony or systemd-timesyncd (the clock), morpheus-morphd (the agent), as a .service or .socket. WARN: any other unit, named, including smartmontools, as HW-07 still reads the disks on every full check; a VM's scope unit is counted, never named. Units in the site standard failedUnitsIgnore, by name with or without .service, raise nothing and are listed as ignored. NOT CHECKED: systemctl did not answer. Seen on real hosts: dailyaidecheck.service (AIDE with no database) on every host, systemd-networkd-wait-online.service on some, smartmontools.service on hosts whose disks smartd could not watch.
+- **Why it matters:** A failed unit is a job the host is not doing, and systemd does not retry it. On the units above it means the host runs without its cluster membership, storage paths, VMs' daemon, clock or agent, which the other checks see only as symptoms. Others are usually noise, but a unit that fails on every host still says the hosts were built that way.
+- **What to do:** Read why with systemctl status <unit> and journalctl -u <unit> on the host. Never restart corosync or dlm with GFS2 mounted: put the host in maintenance mode first. For a unit judged harmless here, such as an AIDE check with no database, list it in failedUnitsIgnore. The plugin has no fix for this.
+
 ## Hardware
 
 ### HW-01: Power supplies healthy and redundant
@@ -601,6 +607,12 @@ What every check id means. The tab shows the same text: click an id, or press He
 - **What it looks at:** WARN: the cluster record's status is failed.
 - **Why it matters:** Usually the last steps of adding a host failed, as its Post-Provision process will show. Those steps did not run on that host, even if it joined.
 - **What to do:** Check its votes and CLU-13, and consider deleting and adding it again.
+
+### MOR-07: Morpheus appliance backups run and succeed
+
+- **What it looks at:** Full check only. Reads the appliance's own backup (the "Morpheus Appliance" backup, type morpheusAppliance) through the plugin API: whether it is enabled, its results, its schedule and its storage bucket, or the default backup bucket when it has none. FAIL: no such backup, disabled, or no successful result at all. WARN: the last success is older than twice its schedule (weekly assumed when no schedule can be read), or no bucket is set, so it is written to the appliance's own disk, or the bucket is a local folder on the appliance. NOT CHECKED: Morpheus did not answer, or answered too little to tell never-succeeded from unread. One appliance, so every cluster reports it, as HST-03 does. The global Backups switch and its default bucket have no member in plugin API 1.5.0, so they are not read directly: with backups off globally the job never runs, which reads as never succeeded here. Built from the API and two real appliances, one with backups off globally, one with no default bucket, both with a weekly appliance backup that had never succeeded.
+- **Why it matters:** The console VM usually sits on one host's local disk (HA-06 says where the manager runs). With no backup, losing that host loses Morpheus's database, and with it every cluster, tenant and VM record. A backup kept on the appliance's own disk goes with it.
+- **What to do:** In Morpheus, turn on Backups and the appliance backup under Administration > Backups, give it a storage bucket off the appliance, then run the Morpheus Appliance backup once and see it succeed. The plugin has no fix for this.
 
 ## Network
 

@@ -3,6 +3,9 @@ package org.hvmhealth.morpheus
 import com.morpheusdata.core.MorpheusContext
 import com.morpheusdata.core.data.DataQuery
 import com.morpheusdata.model.Account
+import com.morpheusdata.model.Backup
+import com.morpheusdata.model.BackupResult
+import com.morpheusdata.model.StorageBucket
 import com.morpheusdata.model.ComputeServer
 import com.morpheusdata.model.Cloud
 import com.morpheusdata.model.ComputeServerGroup
@@ -295,6 +298,54 @@ timeout -k 2 5 corosync-quorumtool -s 2>/dev/null
         }
     }
 
+    static final String APPLIANCE_BACKUP = 'morpheusAppliance'
+
+    /**
+     * The appliance's own backup for MOR-07, through the plugin API only: never REST with a stored login. Null when Morpheus did not answer, or answered too little
+     * to tell never-succeeded from unread. A backup with no bucket uses the default backup bucket, as Morpheus's getBackupStorageBucket says; with none, the
+     * appliance's own disk, which the REST view calls "Local".
+     */
+    Map applianceBackup() {
+        try {
+            Backup b = morpheus.services.backup.list(new DataQuery().withFilter('backupType.code', APPLIANCE_BACKUP)).find { it.active != false }
+            if (!b) {
+                return [found: false]
+            }
+            List<BackupResult> results = backupResults(b.id)
+            if (!results && b.lastResult) {
+                results = null    // a result Morpheus points at that the list did not find: the list's filter is not to be trusted
+            }
+            if (results == null && b.lastResult?.status != 'SUCCEEDED') {
+                return null
+            }
+            List<BackupResult> seen = results != null ? results : [b.lastResult]
+            BackupResult last = seen.max { stamp(it) ?: 0L }
+            StorageBucket bucket = b.storageProvider?.id ? morpheus.services.storageBucket.get(b.storageProvider.id)
+                    : morpheus.services.storageBucket.list(new DataQuery().withFilter('defaultBackupTarget', true)).with { List<StorageBucket> l -> l.find { it.account?.id == b.account?.id } ?: l[0] }
+            [found: true, enabled: b.enabled, cron: b.cronExpression ?: b.backupJob?.cronExpression, lastStatus: last?.status,
+             lastSuccessMs: seen.findAll { it.status == 'SUCCEEDED' }.collect { stamp(it) }.findAll().max(),
+             bucket: bucket ? (bucket.name ?: bucket.bucketName ?: "id ${bucket.id}".toString()) : null, bucketLocal: bucket?.providerType == 'local']
+        } catch (Throwable ignored) {
+            null
+        }
+    }
+
+    /** Null when no filter is one this appliance knows, which is not the same as no results. */
+    private List<BackupResult> backupResults(Long backupId) {
+        for (Map filter : [['backup.id': backupId], [backupId: backupId]]) {
+            try {
+                return morpheus.services.backup.backupResult.list(new DataQuery().withFilters(filter))
+            } catch (Exception ignored) {
+                // the next filter may be the one this appliance knows
+            }
+        }
+        null
+    }
+
+    private static Long stamp(BackupResult r) {
+        (r?.endDate ?: r?.startDate ?: r?.dateCreated)?.time
+    }
+
     /** Accepts any certificate because its date is all that is wanted: nothing is sent over this connection and nothing is trusted from it but the date. */
     static Long peerCertNotAfterMs(String url, int timeoutMs = 5000) {
         URI u = url ? new URI(url) : null
@@ -363,7 +414,7 @@ timeout -k 2 5 corosync-quorumtool -s 2>/dev/null
             new HealthChecker.Host(s.name, inMaintenance(s), s.serverGroupMemberStatus?.name(), s.statusMessage, s.lastAgentUpdate?.time, facts[s.name], s.internalIp ?: s.externalIp, s.maxMemory)
         }, morpheusVms(hs), std, System.currentTimeMillis(),
                 [cpuModel: cluster.getConfigProperty('cpuModel'), notHighAvailability: cluster.getConfigProperty('notHighAvailability'), siteStandardsError: siteError, managerAddrs: managerAddrs(), recordStatus: cluster.status] + failoverConfig() +
-                        (facts.values().any { it?.mode == 'full' } ? [applianceCertNotAfterMs: applianceCertNotAfterMs()] : [:]), networks(), cluster.id,
+                        (facts.values().any { it?.mode == 'full' } ? [applianceCertNotAfterMs: applianceCertNotAfterMs(), applianceBackup: applianceBackup()] : [:]), networks(), cluster.id,
                 allHostRecords().findAll { it.status == REMOVING }*.name, tenantNetworks())
     }
 

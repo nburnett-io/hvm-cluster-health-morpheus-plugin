@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.0
+
+From a read-only health check of two real Morpheus 9.1 appliances, which found problems the plugin did not catch.
+
+**New checks**
+- **HST-09 No failed systemd units**, on every check: the probe reads `systemctl --failed` from systemd's memory, time-limited, and passes on only the characters a unit name may have. FAIL when a unit the host's part in the cluster depends on has failed: corosync, dlm, multipathd, iscsid, open-iscsi, libvirtd, virtqemud, chrony, systemd-timesyncd or morpheus-morphd, as a service or socket. WARN for any other, named. smartmontools warns rather than fails, as HW-07 still reads the disks on every full check, and says nothing watches them in between. A VM's scope unit is counted, never named. NOT CHECKED when systemctl did not answer. Real hosts had `dailyaidecheck.service` failed on every host, `systemd-networkd-wait-online.service` on some and `smartmontools.service` on three.
+- **`failedUnitsIgnore`**, a new site standard in `hvmcliIgnore`'s pattern: failed units that raise no HST-09, by name, with or without `.service`. Empty by default; HST-09 still lists what it ignored.
+- **MOR-07 Morpheus appliance backups run and succeed** (full check): reads the appliance's own backup record (`morpheusAppliance`), its results, schedule and storage bucket through the plugin API, never the REST API with a stored login. FAIL when there is no such backup, it is disabled, or it has never succeeded. WARN when the last success is older than twice its schedule, or it has no bucket and so is written to the appliance's own disk, or its bucket is a local folder there. The global Backups switch has no member in plugin API 1.5.0; with it off the job never runs, which reads as never succeeded. Results that cannot be read read NOT CHECKED, never as never succeeded. One appliance, so every cluster reports it, as HST-03 does. Its text points at HA-06, as the console VM usually sits on one host's local disk.
+
+**Backlog**
+- The IO-pressure item is corrected: PSI io read 60–94% full on every real host running VMs on GFS2, however little they wrote, and 0 on hosts with none, so it is not a signal on this stack and no check is to alarm on it. An IO check, if built, belongs on device latency.
+
+Tested live on a test appliance (Morpheus 9.1, a three-host HVM 2.0 cluster): uploaded over the installed plugin, which kept its id and settings; a full check gave HST-09 WARN on every host for `dailyaidecheck.service`, and on one for `smartmontools.service` as well, and MOR-07 WARN for an appliance backup with no storage bucket, its recent success read through the plugin API. A FAIL from either check has not been seen live.
+
 ## 0.6.0
 
 **A signed read, for a dashboard**

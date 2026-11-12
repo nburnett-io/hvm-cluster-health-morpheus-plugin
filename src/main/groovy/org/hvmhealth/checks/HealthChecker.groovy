@@ -60,7 +60,7 @@ class HealthChecker {
         List<Map> morpheusVms = []    // [name: the libvirt domain, label: its name in Morpheus, host, power, memory]
         Standards standards
         long nowMs = System.currentTimeMillis()
-        Map clusterConfig = [:]       // cpuModel, notHighAvailability, autoRecoverPowerState, cloudAutoRecoverPowerState, datastores, applianceCertNotAfterMs
+        Map clusterConfig = [:]       // cpuModel, notHighAvailability, autoRecoverPowerState, cloudAutoRecoverPowerState, datastores, applianceCertNotAfterMs, applianceBackup
         List<Map> networks = []       // [name, vlan, gateway]: the cluster's Morpheus networks that carry a VLAN
         Long clusterId
         List<String> removing = []    // host records Morpheus has not finished removing; they are not hosts any more
@@ -1857,6 +1857,65 @@ class HealthChecker {
                 add('MOR-03', 'Morpheus agent checking in', Severity.HIGH, age > max ? Status.FAIL : Status.PASS, h.name, "last ${age} s ago".toString(), "<= ${max} s".toString(), st.source('agentMaxAgeSec'))
             }
         }
+        applianceBackupCheck()
+    }
+
+    /** A weekly schedule, Morpheus's own default for the appliance backup, where none could be read. */
+    private static final long DEFAULT_BACKUP_PERIOD_MS = 7L * 86400000L
+
+    /** The longest gap a 5- or 6-field cron leaves between runs, roughly: enough to tell hourly from daily from weekly from monthly. Null when it is not cron. */
+    static Long cronPeriodMs(String cron) {
+        List<String> f = (cron ?: '').trim().tokenize(' ')
+        if (f.size() == 6) {
+            f = f.drop(1)
+        }
+        if (f.size() != 5) {
+            return null
+        }
+        Closure<Boolean> any = { String v -> v in ['*', '?'] }
+        long day = 86400000L
+        !any(f[3]) ? 366L * day : (!any(f[2]) ? 31L * day : (!any(f[4]) ? 7L * day : (!any(f[1]) ? day : 3600000L)))
+    }
+
+    /**
+     * One appliance, so every cluster reports it, as HST-03 does. Read from the appliance's own backup record: the global Backups setting has no member in plugin API
+     * 1.5.0, and with it off the job never runs, which reads here as never succeeded.
+     */
+    private void applianceBackupCheck() {
+        if (!in_.clusterConfig?.containsKey('applianceBackup')) {
+            return
+        }
+        String title = 'Morpheus appliance backups run and succeed'
+        String expected = 'enabled, a success within twice its schedule, kept off the appliance'
+        Map b = in_.clusterConfig.applianceBackup as Map
+        String hint = 'With no backup, losing the host the console VM sits on loses Morpheus\'s database, and with it every cluster\'s record. HA-06 says where the manager runs. ' +
+                'In Morpheus, turn on Backups and the appliance backup under Administration > Backups, give it a storage bucket off the appliance, run the Morpheus Appliance backup once and see it succeed.'
+        if (b == null) {
+            add('MOR-07', title, Severity.HIGH, Status.NOT_CHECKED, null, 'cannot tell: Morpheus did not answer for its backups', expected, 'plugin')
+            return
+        }
+        if (!b.found || b.enabled == false || b.lastSuccessMs == null) {
+            String seen = !b.found ? 'no Morpheus Appliance backup is defined' : (b.enabled == false ? 'the Morpheus Appliance backup is disabled'
+                    : "the Morpheus Appliance backup has never succeeded${b.lastStatus ? "; its last run: ${b.lastStatus}" : '; it has never run'}")
+            add('MOR-07', title, Severity.HIGH, Status.FAIL, null, seen.toString(), expected, 'plugin', null, Tier.NONE, hint)
+            return
+        }
+        Long period = cronPeriodMs(b.cron as String)
+        long maxAge = 2L * (period ?: DEFAULT_BACKUP_PERIOD_MS)
+        long age = Math.max(0L, in_.nowMs - (b.lastSuccessMs as long))
+        // the bucket is the operator's, and a cluster's owner can be a tenant, so it is never named
+        String ago = age < 2L * 86400000L ? "${age.intdiv(3600000L)} h" : "${age.intdiv(86400000L)} days"
+        List<String> wrong = []
+        if (age > maxAge) {
+            wrong << "last success ${ago} ago, over twice its ${period ? 'schedule' : 'assumed weekly schedule'} (${b.cron ?: 'none read'})".toString()
+        }
+        if (!b.bucket) {
+            wrong << 'no storage bucket, so it is written to the appliance\'s own disk'
+        } else if (b.bucketLocal) {
+            wrong << 'its storage bucket is a local folder on the appliance itself'
+        }
+        String seen = wrong ? wrong.join('; ') : "last success ${ago} ago, kept off the appliance".toString()
+        add('MOR-07', title, Severity.HIGH, wrong ? Status.WARN : Status.PASS, null, seen, expected, 'plugin', null, Tier.NONE, wrong ? hint : null)
     }
 
     // ------------------------------------------------------------------ failover settings
@@ -2497,8 +2556,44 @@ class HealthChecker {
             cpuPressureCheck(h)
             memoryPressureCheck(h)
             rootDiskCheck(h)
+            failedUnitsCheck(h)
             vmCrashCheck(h)
         }
+    }
+
+    /**
+     * Units the cluster, its storage, its VMs, its clock or Morpheus's reach depend on: failed, they fail HST-09. Matched on the name before .service or .socket.
+     * smartmontools is not here: HW-07 reads the disks itself on every full check, so a failed smartd loses the continuous watch, not the only one.
+     */
+    static final Map<String, String> CRITICAL_UNITS = [
+            corosync: 'cluster membership', dlm: 'GFS2 locking', multipathd: 'storage paths', iscsid: 'iSCSI sessions', 'open-iscsi': 'iSCSI logins at boot',
+            libvirtd: 'VM management and migration', virtqemud: 'VM management and migration', chrony: 'the clock', chronyd: 'the clock',
+            'systemd-timesyncd': 'the clock', 'morpheus-morphd': 'the Morpheus agent',
+    ]
+
+    static String unitBase(String unit) {
+        unit.replaceFirst(/\.(service|socket)$/, '')
+    }
+
+    /** A VM's scope carries the VM's name, which a report must not, so it is counted rather than named. */
+    private void failedUnitsCheck(Host h) {
+        String title = 'No failed systemd units'
+        if (!h.facts.failedUnitsRead) {
+            add('HST-09', title, Severity.HIGH, Status.NOT_CHECKED, h.name, 'cannot tell: systemctl did not answer', 'none failed', 'plugin')
+            return
+        }
+        Set<String> ignore = (st.val('failedUnitsIgnore') as List<String>).collect { unitBase(it) } as Set<String>
+        List<String> ignored = h.facts.failedUnits.findAll { unitBase(it) in ignore }
+        List<String> failed = h.facts.failedUnits - ignored
+        List<String> critical = failed.findAll { CRITICAL_UNITS.containsKey(unitBase(it)) }
+        int scopes = failed.count { it ==~ /machine-.*\.scope/ } as int
+        List<String> named = failed.findAll { !(it ==~ /machine-.*\.scope/) } + (scopes ? ["${scopes} VM scope unit(s)".toString()] : [])
+        String seen = (failed ? "failed: ${named.join(', ')}" : 'none failed') + (ignored ? "; ignored by failedUnitsIgnore: ${ignored.join(', ')}" : '')
+        String hint = critical
+                ? "${critical.collect { "${it} (${CRITICAL_UNITS[unitBase(it)]})" }.join(', ')} failed, so this host is running without it. See why with systemctl status and journalctl -u on the host. Corosync and dlm are never to be restarted with GFS2 mounted: put the host in maintenance mode first. The plugin has no fix for this.".toString()
+                : (failed ? (failed.any { unitBase(it) in ['smartmontools', 'smartd'] } ? 'smartd is down, so nothing watches the disks between full checks (HW-07 still reads them then). ' : '') +
+                'Nothing the cluster depends on, but a unit that failed is a job not done: see why with systemctl status on the host, and fix it or list it in failedUnitsIgnore.' : null)
+        add('HST-09', title, Severity.HIGH, critical ? Status.FAIL : (failed ? Status.WARN : Status.PASS), h.name, seen.toString(), 'none failed', st.source('failedUnitsIgnore'), null, Tier.NONE, hint)
     }
 
     private void oomCheck(Host h) {

@@ -69,6 +69,7 @@ newer than the documentation.
 | `memPressureWarnPct`, `memPressureFailPct` | 5, 20 | plugin | Share of the last minute with a task waiting for memory. A first judgement, not yet measured on busy hosts |
 | `rootDiskWarnPct`, `rootDiskFailPct` | 85, 95 | plugin | Space or inodes used on `/`, `/var`, `/var/log`, `/tmp` and `/boot` |
 | `hvmcliIgnore` | the four below | plugin | HPE health checks that raise no HPE-01, by name, ignoring case. They still show in the HPE checks panel |
+| `failedUnitsIgnore` | none | plugin | Failed systemd units that raise no HST-09, by name, with or without `.service`. HST-09 still lists them as ignored. Candidates seen on real hosts: `dailyaidecheck` (AIDE installed with no database) and `systemd-networkd-wait-online` |
 
 The default `hvmcliIgnore` is `Cluster status`, `Cluster nodes online`, `Cluster failed resources` and `Cluster STONITH`. These read Pacemaker, which HVM masks by design, so they warn on every healthy cluster. A list in the site standards replaces the default rather than adding to it, so keep these four when you add your own.
 

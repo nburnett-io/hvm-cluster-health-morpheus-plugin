@@ -387,6 +387,13 @@ bounded 5 vm_crashes
 # Named paths only, and in a job as it could sleep with a dead root disk. A bare df, or df -x gfs2, stats every mount, and that blocks on a frozen GFS2.
 root_df() { df --output=source,target,pcent,ipcent / /var /var/log /tmp /boot 2>/dev/null | awk 'NR>1 && !s[$1]++ {gsub(/%/, ""); print "ROOT_DF=" $2 "|" $3 "|" $4}'; }
 bounded 5 root_df || echo 'ROOT_DF_CUT=1'
+# The units systemd holds as failed, from its own memory: no unit file or mount is read. FAILED_READ says the list was read, so none listed is none failed.
+# A unit name can carry a VM's name (machine-qemu-...scope), so only the characters systemd allows in a name are passed on.
+if FAILED="$(t 5 systemctl --failed --no-legend --plain)"; then
+  echo 'FAILED_READ=1'
+  # the name is the first word, or the second where a systemd prints its status marker first
+  awk 'NF {u = ($1 ~ /\./) ? $1 : $2; gsub(/[^A-Za-z0-9@._:\\-]/, "_", u); print "FAILED_UNIT=" u}' <<<"$FAILED" | head -40
+fi
 
 if [ "$MODE" = full ]; then
   sec journals

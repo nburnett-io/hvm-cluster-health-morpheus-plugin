@@ -61,6 +61,7 @@ class Standards {
             rootDiskWarnPct   : [value: 85, source: 'plugin', note: 'Space or inodes used on the host\'s own filesystems'],
             rootDiskFailPct   : [value: 95, source: 'plugin', note: 'The same, failing the check'],
             hvmcliIgnore      : [value: ['Cluster status', 'Cluster nodes online', 'Cluster failed resources', 'Cluster STONITH'], source: 'plugin', note: 'HPE health checks that raise no finding, by name. These four read Pacemaker, which HVM masks by design, so they warn on every healthy cluster'],
+            failedUnitsIgnore : [value: [], source: 'plugin', note: 'Failed systemd units that raise no HST-09, by name, with or without .service. None by default: a unit that fails on every host still says something about the hosts'],
             kernelCveMin      : [value: null, source: 'plugin', note: 'Oldest kernel for this layout that carries the fix for the KVM guest-to-host escapes (Januscape, Zapscape). Pinned per layout to the Ubuntu fix level; unverified against HPE\'s build, so site-settable'],
     ]
 
@@ -134,7 +135,7 @@ class Standards {
             return
         }
         boolean ok
-        if (key in ['ntpServers', 'trunkAllowedVms', 'hvmcliIgnore']) {
+        if (key in ['ntpServers', 'trunkAllowedVms', 'hvmcliIgnore', 'failedUnitsIgnore']) {
             ok = stringList(v)
         } else if (key in ['clusterCpuModel', 'osVersion', 'agentMinVersion', 'minKernel', 'kernelCveMin']) {
             ok = v instanceof String
